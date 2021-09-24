@@ -1,0 +1,166 @@
+From f38c4d616be91da9da8b00dfdfcb0525cbad768d Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Sun, 1 Aug 2021 17:27:23 -0700
+Subject: [PATCH 21/34] gmscompat: Optimize compatibility change checks
+
+Querying the state of a compatibility change is relatively expensive
+because it involves a layer of Compatibility.Callbacks indirection
+followed by an array binary search for disabled change IDs. Considering
+that some of our hooks are in potentially-hot paths, such as
+File#lastModified() in file manager/archival apps, it's worth optimizing
+the checks.
+
+For performance, check the compatibility change states once at init time
+(before Application#onCreate) and cache the states in volatile fields.
+The fields need to be volatile in order to ensure thread safety during
+early app init (especially if GmsCompat classes get loaded into Zygote
+somehow), but that's a miniscule cost compared to calling
+Compatibility#isChangeEnabled repeatedly.
+
+Change-Id: Ic8a9afb388428efc0ead638bd6f41bc789192cbc
+---
+ .../android/app/compat/gms/GmsCompat.java     | 29 ++++++++++++++-----
+ .../android/internal/gmscompat/GmsHooks.java  |  2 ++
+ .../gmscompat/dynamite/GmsDynamiteHooks.java  | 13 ++++-----
+ 3 files changed, 28 insertions(+), 16 deletions(-)
+
+diff --git a/core/java/android/app/compat/gms/GmsCompat.java b/core/java/android/app/compat/gms/GmsCompat.java
+index 6afc66896995..7c01b6edbe22 100644
+--- a/core/java/android/app/compat/gms/GmsCompat.java
++++ b/core/java/android/app/compat/gms/GmsCompat.java
+@@ -52,6 +52,7 @@ import com.android.internal.gmscompat.GmsInfo;
+ @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+ public final class GmsCompat {
+     private static final String TAG = "GmsCompat/Core";
++    private static final boolean DEBUG_VERBOSE = false;
+ 
+     /**
+      * Whether to enable Google Play Services compatibility for this app.
+@@ -74,11 +75,22 @@ public final class GmsCompat {
+     @Disabled // Overridden as a special case in CompatChange
+     private static final long GMS_UNPRIVILEGED_DYNAMITE_CLIENT = 7528921493777479941L;
+ 
+-    private static final boolean DEBUG_VERBOSE = false;
++    // Some hooks are in (potentially) hot paths, so cache the change enable states.
++    private static volatile boolean isGmsCompatEnabled = false;
++    private static volatile boolean isDynamiteClientEnabled = false;
+ 
+     // Static only
+     private GmsCompat() { }
+ 
++    public static boolean isEnabled() {
++        return isGmsCompatEnabled;
++    }
++
++    /** @hide */
++    public static boolean isDynamiteClient() {
++        return isDynamiteClientEnabled;
++    }
++
+     private static void logEnabled(String changeName, boolean enabled) {
+         if (!DEBUG_VERBOSE) {
+             return;
+@@ -105,13 +117,14 @@ public final class GmsCompat {
+         return enabled;
+     }
+ 
+-    public static boolean isEnabled() {
+-        return isChangeEnabled("GMS_UNPRIVILEGED_COMPAT", GMS_UNPRIVILEGED_COMPAT);
+-    }
+-
+-    /** @hide */
+-    public static boolean isDynamiteClient() {
+-        return isChangeEnabled("GMS_UNPRIVILEGED_DYNAMITE_CLIENT", GMS_UNPRIVILEGED_DYNAMITE_CLIENT);
++    /**
++     * Must be called to initialize the compatibility change enable states before any hooks run.
++     *
++     * @hide
++     */
++    public static void initChangeEnableStates() {
++        isGmsCompatEnabled = isChangeEnabled("GMS_UNPRIVILEGED_COMPAT", GMS_UNPRIVILEGED_COMPAT);
++        isDynamiteClientEnabled = isChangeEnabled("GMS_UNPRIVILEGED_DYNAMITE_CLIENT", GMS_UNPRIVILEGED_DYNAMITE_CLIENT);
+     }
+ 
+     /**
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index 57ca25a450ba..d21346d59aee 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -198,6 +198,8 @@ public final class GmsHooks {
+     // directory is not supported. https://crbug.com/558377
+     // Instrumentation#newApplication(ClassLoader, String, Context)
+     public static void initApplicationBeforeOnCreate(Application app) {
++        GmsCompat.initChangeEnableStates();
++
+         if (GmsCompat.isEnabled()) {
+             String processName = Application.getProcessName();
+             if (!app.getPackageName().equals(processName)) {
+diff --git a/core/java/com/android/internal/gmscompat/dynamite/GmsDynamiteHooks.java b/core/java/com/android/internal/gmscompat/dynamite/GmsDynamiteHooks.java
+index dfd1a1c6e73b..38f0bf074829 100644
+--- a/core/java/com/android/internal/gmscompat/dynamite/GmsDynamiteHooks.java
++++ b/core/java/com/android/internal/gmscompat/dynamite/GmsDynamiteHooks.java
+@@ -18,6 +18,7 @@ package com.android.internal.gmscompat.dynamite;
+ 
+ import android.app.ActivityThread;
+ import android.app.Application;
++import android.app.compat.gms.GmsCompat;
+ import android.content.Context;
+ import android.content.res.ApkAssets;
+ import android.os.ParcelFileDescriptor;
+@@ -49,8 +50,6 @@ import java.util.stream.Collectors;
+  * @hide
+  */
+ public final class GmsDynamiteHooks {
+-    // Some hooks can be considered hot paths, so cache the enabled state.
+-    private static volatile boolean isClient = false;
+     // Created lazily because most apps don't use Dynamite modules
+     private static DynamiteContext clientContext = null;
+ 
+@@ -67,8 +66,6 @@ public final class GmsDynamiteHooks {
+     }
+ 
+     public static void initClientApp() {
+-        isClient = true;
+-
+         // Install hooks (requires libcore changes)
+         DexPathList.postConstructorBufferHook = GmsDynamiteHooks::getDexPathListBuffers;
+         File.lastModifiedHook = GmsDynamiteHooks::getFileLastModified;
+@@ -89,7 +86,7 @@ public final class GmsDynamiteHooks {
+     // For Android assets and resources
+     // ApkAssets#loadFromPath(String, int)
+     public static ApkAssets loadAssetsFromPath(String path, int flags) throws IOException {
+-        if (!isClient) {
++        if (!GmsCompat.isDynamiteClient()) {
+             return null;
+         }
+ 
+@@ -105,7 +102,7 @@ public final class GmsDynamiteHooks {
+     // For Java code
+     // DexPathList(ClassLoader, String, String, File, boolean)
+     private static ByteBuffer[] getDexPathListBuffers(DexPathList pathList) {
+-        if (!isClient) {
++        if (!GmsCompat.isDynamiteClient()) {
+             return null;
+         }
+ 
+@@ -130,7 +127,7 @@ public final class GmsDynamiteHooks {
+     // To fix false-positive "Module APK has been modified" check
+     // File#lastModified()
+     private static Long getFileLastModified(File file) {
+-        if (!isClient) {
++        if (!GmsCompat.isDynamiteClient()) {
+             return null;
+         }
+ 
+@@ -156,7 +153,7 @@ public final class GmsDynamiteHooks {
+ 
+     // To start the module loading process and map native library paths to fd from remote
+     public static String mapRemoteLibraryPaths(String librarySearchPath) {
+-        if (!isClient || librarySearchPath == null) {
++        if (!GmsCompat.isDynamiteClient() || librarySearchPath == null) {
+             return librarySearchPath;
+         }
+ 
+-- 
+2.33.0
+

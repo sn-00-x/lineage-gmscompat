@@ -1,0 +1,76 @@
+From 6b727612e60f65815147b28385c13cd0c94df272 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Tue, 17 Aug 2021 20:54:15 -0700
+Subject: [PATCH 25/34] gmscompat: Fix detection of system processes in
+ secondary users
+
+The chooser and resolver activities run as a special system UI process
+belonging to the core "android" package, separate from both
+system_server and com.android.systemui. This process, named
+"android:ui", runs separately under each user with the special app ID
+1000 (SYSTEM_UID).
+
+Check the app ID instead of the UID to fix detection of SYSTEM_UID
+processes in secondary users.
+
+This fixes the following crash:
+
+FATAL EXCEPTION: AsyncTask #2
+Process: system:ui, PID: 8982
+java.lang.RuntimeException: An error occurred while executing doInBackground()
+	at android.os.AsyncTask$4.done(AsyncTask.java:415)
+	at java.util.concurrent.FutureTask.finishCompletion(FutureTask.java:383)
+	at java.util.concurrent.FutureTask.setException(FutureTask.java:252)
+	at java.util.concurrent.FutureTask.run(FutureTask.java:271)
+	at android.os.AsyncTask$SerialExecutor$1.run(AsyncTask.java:305)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1167)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:641)
+	at java.lang.Thread.run(Thread.java:923)
+Caused by: java.lang.RuntimeException: No data directory found for package android
+	at android.app.ContextImpl.getDataDir(ContextImpl.java:2560)
+	at com.android.internal.gmscompat.dynamite.client.DynamiteContext.<init>(DynamiteContext.java:58)
+	at com.android.internal.gmscompat.dynamite.GmsDynamiteHooks.getClientContext(GmsDynamiteHooks.java:64)
+	at com.android.internal.gmscompat.dynamite.GmsDynamiteHooks.loadAssetsFromPath(GmsDynamiteHooks.java:93)
+	at android.content.res.ApkAssets.loadFromPath(ApkAssets.java:143)
+	at android.app.ResourcesManager.loadApkAssets(ResourcesManager.java:374)
+	at android.app.ResourcesManager.access$000(ResourcesManager.java:67)
+	at android.app.ResourcesManager$ApkAssetsSupplier.load(ResourcesManager.java:146)
+	at android.app.ResourcesManager.createApkAssetsSupplierNotLocked(ResourcesManager.java:833)
+	at android.app.ResourcesManager.getResources(ResourcesManager.java:937)
+	at android.app.ActivityThread.getTopLevelResources(ActivityThread.java:2226)
+	at android.app.ApplicationPackageManager.getResourcesForApplication(ApplicationPackageManager.java:1682)
+	at com.android.internal.app.ResolverListAdapter$TargetPresentationGetter.getIconBitmap(ResolverListAdapter.java:920)
+	at com.android.internal.app.ResolverListAdapter$ActivityInfoPresentationGetter.getIconBitmap(ResolverListAdapter.java:843)
+	at com.android.internal.app.ResolverListAdapter$TargetPresentationGetter.getIcon(ResolverListAdapter.java:908)
+	at com.android.internal.app.ResolverListAdapter$ActivityInfoPresentationGetter.getIcon(ResolverListAdapter.java:843)
+	at com.android.internal.app.ResolverListAdapter.loadIconForResolveInfo(ResolverListAdapter.java:599)
+	at com.android.internal.app.ResolverListAdapter$LoadIconTask.doInBackground(ResolverListAdapter.java:782)
+	at com.android.internal.app.ResolverListAdapter$LoadIconTask.doInBackground(ResolverListAdapter.java:769)
+	at android.os.AsyncTask$3.call(AsyncTask.java:394)
+	at java.util.concurrent.FutureTask.run(FutureTask.java:266)
+	... 4 more
+
+Change-Id: I928db502d2cc24e50ed2798575e0e8a37475cd97
+---
+ core/java/android/app/compat/gms/GmsCompat.java | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/core/java/android/app/compat/gms/GmsCompat.java b/core/java/android/app/compat/gms/GmsCompat.java
+index 4aadde0b4f5b..7802a84a06ab 100644
+--- a/core/java/android/app/compat/gms/GmsCompat.java
++++ b/core/java/android/app/compat/gms/GmsCompat.java
+@@ -108,8 +108,9 @@ public final class GmsCompat {
+         boolean enabled = Compatibility.isChangeEnabled(changeId);
+ 
+         // Compatibility changes aren't available in the system process, but this should never be
+-        // enabled for it.
+-        if (Process.myUid() == Process.SYSTEM_UID) {
++        // enabled for it or other core "android" system processes (such as the android:ui process
++        // used for chooser and resolver activities).
++        if (UserHandle.getAppId(Process.myUid()) == Process.SYSTEM_UID) {
+             enabled = false;
+         }
+ 
+-- 
+2.33.0
+

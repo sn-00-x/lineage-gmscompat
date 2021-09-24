@@ -1,0 +1,140 @@
+From 0352ac54f4baa7fc1b05e838ebdcb04b9da84ca9 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Fri, 30 Jul 2021 18:37:17 -0700
+Subject: [PATCH 17/34] gmscompat: Add support for running GMS in secondary
+ users
+
+Tested functionality:
+  - Account login (including 2FA with NFC security key)
+  - Play Store
+  - Firebase Cloud Messaging (Signal, Discord)
+  - Firebase database API (Swift Backup)
+  - Firebase app indexing (GMS debug settings)
+  - Google Play Games
+  - Account settings
+  - Google My Account
+  - SMS verification receiver (Signal)
+  - Play license verification (both in-app purchases and paid apps)
+
+Change-Id: I8af352307da4b32c7e9944a5a219f70b307010d5
+---
+ core/java/android/app/ContextImpl.java                 |  8 ++++++++
+ core/java/android/os/UserManager.java                  | 10 ++++++++++
+ core/java/com/android/internal/gmscompat/GmsHooks.java |  8 ++++++++
+ telephony/java/android/telephony/TelephonyManager.java |  8 ++++++++
+ 4 files changed, 34 insertions(+)
+
+diff --git a/core/java/android/app/ContextImpl.java b/core/java/android/app/ContextImpl.java
+index d67c20e3cfff..a4033f741c5d 100644
+--- a/core/java/android/app/ContextImpl.java
++++ b/core/java/android/app/ContextImpl.java
+@@ -1286,6 +1286,8 @@ class ContextImpl extends Context {
+ 
+     @Override
+     public void sendBroadcastAsUser(Intent intent, UserHandle user) {
++        user = GmsHooks.getUserHandle(user);
++
+         String resolvedType = intent.resolveTypeIfNeeded(getContentResolver());
+         try {
+             intent.prepareToLeaveProcess(this);
+@@ -1307,6 +1309,8 @@ class ContextImpl extends Context {
+     @Override
+     public void sendBroadcastAsUser(Intent intent, UserHandle user, String receiverPermission,
+             Bundle options) {
++        user = GmsHooks.getUserHandle(user);
++
+         String resolvedType = intent.resolveTypeIfNeeded(getContentResolver());
+         String[] receiverPermissions = receiverPermission == null ? null
+                 : new String[] {receiverPermission};
+@@ -1324,6 +1328,8 @@ class ContextImpl extends Context {
+     @Override
+     public void sendBroadcastAsUser(Intent intent, UserHandle user,
+             String receiverPermission, int appOp) {
++        user = GmsHooks.getUserHandle(user);
++
+         String resolvedType = intent.resolveTypeIfNeeded(getContentResolver());
+         String[] receiverPermissions = receiverPermission == null ? null
+                 : new String[] {receiverPermission};
+@@ -1358,6 +1364,8 @@ class ContextImpl extends Context {
+     public void sendOrderedBroadcastAsUser(Intent intent, UserHandle user,
+             String receiverPermission, int appOp, Bundle options, BroadcastReceiver resultReceiver,
+             Handler scheduler, int initialCode, String initialData, Bundle initialExtras) {
++        user = GmsHooks.getUserHandle(user);
++
+         IIntentReceiver rd = null;
+         if (resultReceiver != null) {
+             if (mPackageInfo != null) {
+diff --git a/core/java/android/os/UserManager.java b/core/java/android/os/UserManager.java
+index 11f1ce399b8d..f5ace0f327a2 100644
+--- a/core/java/android/os/UserManager.java
++++ b/core/java/android/os/UserManager.java
+@@ -1837,6 +1837,11 @@ public class UserManager {
+      * @return whether this process is running under the system user.
+      */
+     public boolean isSystemUser() {
++        if (GmsCompat.isEnabled()) {
++            // com.android.vending: java.lang.IllegalStateException: This method must be called in primary profile
++            return true;
++        }
++
+         return UserHandle.myUserId() == UserHandle.USER_SYSTEM;
+     }
+ 
+@@ -4175,6 +4180,11 @@ public class UserManager {
+      */
+     @UnsupportedAppUsage
+     public int getUserSerialNumber(@UserIdInt int userId) {
++        if (GmsCompat.isEnabled()) {
++            // com.google.android.gms.persistent: java.lang.IllegalStateException - com.google.android.gms.gcm.GcmProxyIntentOperation.b
++            return 0;
++        }
++
+         try {
+             return mService.getUserSerialNumber(userId);
+         } catch (RemoteException re) {
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index 123271cdec0e..52c7a7b8f209 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -34,6 +34,7 @@ import android.content.pm.PackageManager;
+ import android.content.pm.SharedLibraryInfo;
+ import android.os.Build;
+ import android.os.Process;
++import android.os.UserHandle;
+ import android.os.UserManager;
+ import android.provider.Settings;
+ import android.util.Log;
+@@ -240,4 +241,11 @@ public final class GmsHooks {
+         // Don't dispatch it, otherwise Play Store abandons the session
+         return true;
+     }
++
++    // Redirect cross-user interactions to current user
++    // ContextImpl#sendOrderedBroadcastAsUser
++    // ContextImpl#sendBroadcastAsUser
++    public static UserHandle getUserHandle(UserHandle user) {
++        return GmsCompat.isEnabled() ? Process.myUserHandle() : user;
++    }
+ }
+diff --git a/telephony/java/android/telephony/TelephonyManager.java b/telephony/java/android/telephony/TelephonyManager.java
+index 1f698bf6f505..97c9b2aa48ba 100644
+--- a/telephony/java/android/telephony/TelephonyManager.java
++++ b/telephony/java/android/telephony/TelephonyManager.java
+@@ -4519,6 +4519,14 @@ public class TelephonyManager {
+                          mContext.getAttributionTag());
+         } catch (RemoteException ex) {
+         } catch (NullPointerException ex) {
++        } catch (SecurityException ex) {
++            if (GmsCompat.isEnabled()) {
++                // Google Play Services settings -> Account services -> Google Pay -> Add a payment method
++                // com.google.android.gms: java.lang.SecurityException: getLine1NumberForDisplay: Neither user 1010142 nor current process has android.permission.READ_PHONE_STATE, android.permission.READ_SMS, or android.permission.READ_PHONE_NUMBERS
++                return null;
++            } else {
++                throw ex;
++            }
+         }
+         if (number != null) {
+             return number;
+-- 
+2.33.0
+

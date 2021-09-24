@@ -1,0 +1,110 @@
+From d299fcec98bfb4f51c99b6a68f08baa50c0c9702 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Fri, 30 Jul 2021 18:24:37 -0700
+Subject: [PATCH 16/34] gmscompat: Improve foreground service notification UX
+
+- Description = "Tap to hide" to make it obvious that these
+  notifications are unnecessary and can be disabled
+- Open notification channel settings on tap to simplify disabling
+- Clarify what the notification is for with "%s is running"
+  (app_running_notification_title)
+
+Change-Id: I81d029b9924715bb1f31bf1c0d3ae6e562b9cb9d
+---
+ .../android/internal/gmscompat/GmsHooks.java  | 23 ++++++++++++-------
+ core/res/res/values/strings.xml               |  5 +++-
+ core/res/res/values/symbols.xml               |  3 ++-
+ 3 files changed, 21 insertions(+), 10 deletions(-)
+
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index 5745a6b9bf71..123271cdec0e 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -73,23 +73,23 @@ public final class GmsHooks {
+         return context.startForegroundService(service);
+     }
+ 
+-    private static void createFgsChannel(Service service) {
++    private static void createFgsChannel(Context context) {
+         if (fgsChannelCreated) {
+             return;
+         }
+ 
+         NotificationManager notificationManager = (NotificationManager)
+-                service.getSystemService(Context.NOTIFICATION_SERVICE);
++                context.getSystemService(Context.NOTIFICATION_SERVICE);
+ 
+         NotificationChannelGroup group = new NotificationChannelGroup(FGS_GROUP_ID,
+-                service.getText(R.string.foreground_service_gmscompat_group));
++                context.getText(R.string.foreground_service_gmscompat_group));
+         notificationManager.createNotificationChannelGroup(group);
+ 
+-        CharSequence name = service.getText(R.string.foreground_service_gmscompat_channel);
++        CharSequence name = context.getText(R.string.foreground_service_gmscompat_channel);
+         NotificationChannel channel = new NotificationChannel(FGS_CHANNEL_ID, name,
+                 NotificationManager.IMPORTANCE_LOW);
+         channel.setGroup(FGS_GROUP_ID);
+-        channel.setDescription(service.getString(R.string.foreground_service_gmscompat_description));
++        channel.setDescription(context.getString(R.string.foreground_service_gmscompat_channel_desc));
+         channel.setShowBadge(false);
+         notificationManager.createNotificationChannel(channel);
+ 
+@@ -107,12 +107,19 @@ public final class GmsHooks {
+ 
+         // Channel
+         createFgsChannel(service);
++
++        // Intent: notification channel settings
++        Intent intent = new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS);
++        intent.putExtra(Settings.EXTRA_APP_PACKAGE, service.getPackageName());
++        intent.putExtra(Settings.EXTRA_CHANNEL_ID, FGS_CHANNEL_ID);
++        PendingIntent pi = PendingIntent.getActivity(service, 0, intent, PendingIntent.FLAG_IMMUTABLE);
++
+         // Notification
+-        PendingIntent pi = PendingIntent.getActivity(service, 100, new Intent(),
+-                PendingIntent.FLAG_IMMUTABLE);
++        CharSequence appName = service.getApplicationInfo().loadLabel(service.getPackageManager());
+         Notification notification = new Notification.Builder(service, FGS_CHANNEL_ID)
+                 .setSmallIcon(service.getApplicationInfo().icon)
+-                .setContentTitle(service.getApplicationInfo().loadLabel(service.getPackageManager()))
++                .setContentTitle(service.getString(R.string.app_running_notification_title, appName))
++                .setContentText(service.getText(R.string.foreground_service_gmscompat_notif_desc))
+                 .setContentIntent(pi)
+                 .build();
+ 
+diff --git a/core/res/res/values/strings.xml b/core/res/res/values/strings.xml
+index 8926c101c5ae..851c640110a5 100644
+--- a/core/res/res/values/strings.xml
++++ b/core/res/res/values/strings.xml
+@@ -743,10 +743,13 @@
+     <string name="foreground_service_gmscompat_channel">Services</string>
+ 
+     <!-- Description for foreground service notification channel created by GmsCompat  -->
+-    <string name="foreground_service_gmscompat_description">These notifications are created by the
++    <string name="foreground_service_gmscompat_channel_desc">These notifications are created by the
+         Google Play Services compatibility layer in order to keep services running in the
+         background.\n\nDisable this category to hide the unnecessary notifications.</string>
+ 
++    <!-- Description for foreground service notifications created by GmsCompat  -->
++    <string name="foreground_service_gmscompat_notif_desc">Tap to hide</string>
++
+     <!-- Displayed to the user to tell them that they have started up the phone in "safe mode" -->
+     <string name="safeMode">Safe mode</string>
+ 
+diff --git a/core/res/res/values/symbols.xml b/core/res/res/values/symbols.xml
+index 5f134022c806..fd220856ca9a 100644
+--- a/core/res/res/values/symbols.xml
++++ b/core/res/res/values/symbols.xml
+@@ -3457,7 +3457,8 @@
+ 
+   <java-symbol type="string" name="foreground_service_gmscompat_group" />
+   <java-symbol type="string" name="foreground_service_gmscompat_channel" />
+-  <java-symbol type="string" name="foreground_service_gmscompat_description" />
++  <java-symbol type="string" name="foreground_service_gmscompat_channel_desc" />
++  <java-symbol type="string" name="foreground_service_gmscompat_notif_desc" />
+ 
+   <java-symbol type="bool" name="config_enableCredentialFactoryResetProtection" />
+ 
+-- 
+2.33.0
+

@@ -1,0 +1,211 @@
+From cd384443d22da5eb6a0ff661be8118251320ec7b Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Sat, 31 Jul 2021 01:48:58 -0700
+Subject: [PATCH 2/2] libcore: Add hooks for Dynamite module support in
+ GmsCompat
+
+These hooks are necessary for GmsCompat to support Google Play Services'
+dynamic module system (Dynamite) without weakening the SELinux sandbox
+to allow other apps to open module APKs from
+/data/user_de/0/com.google.android.gms/app_chimera/m.
+
+To minimize changes in libcore, each hook is a simple interface method
+call that delegates the actual hook code to GmsCompat in
+frameworks/base.
+
+Change-Id: I49c7c2b2fe8b356137dbc90955a7b63684253457
+---
+ .../system/DelegateLastClassLoader.java       | 17 +++++++++++++-
+ .../main/java/dalvik/system/DexPathList.java  | 23 +++++++++++++++++++
+ .../api/platform/current-api.txt              |  9 ++++++++
+ ojluni/src/main/java/java/io/File.java        | 17 ++++++++++++++
+ 4 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/dalvik/src/main/java/dalvik/system/DelegateLastClassLoader.java b/dalvik/src/main/java/dalvik/system/DelegateLastClassLoader.java
+index 9481e3f940..7076760345 100644
+--- a/dalvik/src/main/java/dalvik/system/DelegateLastClassLoader.java
++++ b/dalvik/src/main/java/dalvik/system/DelegateLastClassLoader.java
+@@ -21,7 +21,9 @@ import sun.misc.CompoundEnumeration;
+ import java.io.IOException;
+ import java.net.URL;
+ import java.util.Enumeration;
++import java.util.function.Function;
+ 
++import libcore.api.CorePlatformApi;
+ import libcore.util.NonNull;
+ import libcore.util.Nullable;
+ 
+@@ -39,6 +41,13 @@ import libcore.util.Nullable;
+  */
+ public final class DelegateLastClassLoader extends PathClassLoader {
+ 
++    /**
++     * Pre-constructor librarySearchPath hook for GmsCompat
++     * @hide
++     */
++    @CorePlatformApi
++    public static volatile Function<String, String> librarySearchPathHook;
++
+     /**
+      * Whether resource loading delegates to the parent class loader. True by default.
+      */
+@@ -99,7 +108,7 @@ public final class DelegateLastClassLoader extends PathClassLoader {
+ 
+     public DelegateLastClassLoader(@NonNull String dexPath, @Nullable String librarySearchPath,
+             @Nullable ClassLoader parent, boolean delegateResourceLoading) {
+-        super(dexPath, librarySearchPath, parent);
++        super(dexPath, filterLibrarySearchPath(librarySearchPath), parent);
+         this.delegateResourceLoading = delegateResourceLoading;
+     }
+ 
+@@ -115,6 +124,12 @@ public final class DelegateLastClassLoader extends PathClassLoader {
+         this.delegateResourceLoading = true;
+     }
+ 
++    private static String filterLibrarySearchPath(String librarySearchPath) {
++        return librarySearchPathHook == null ?
++                librarySearchPath :
++                librarySearchPathHook.apply(librarySearchPath);
++    }
++
+     @Override
+     protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+         // First, check whether the class has already been loaded. Return it if that's the
+diff --git a/dalvik/src/main/java/dalvik/system/DexPathList.java b/dalvik/src/main/java/dalvik/system/DexPathList.java
+index 798166c572..d81f217884 100644
+--- a/dalvik/src/main/java/dalvik/system/DexPathList.java
++++ b/dalvik/src/main/java/dalvik/system/DexPathList.java
+@@ -33,6 +33,9 @@ import java.util.Collections;
+ import java.util.Enumeration;
+ import java.util.List;
+ import java.util.Objects;
++import java.util.function.Function;
++
++import libcore.api.CorePlatformApi;
+ import libcore.io.ClassPathURLStreamHandler;
+ import libcore.io.IoUtils;
+ import libcore.io.Libcore;
+@@ -54,10 +57,18 @@ import static android.system.OsConstants.S_ISDIR;
+  *
+  * @hide
+  */
++@CorePlatformApi
+ public final class DexPathList {
+     private static final String DEX_SUFFIX = ".dex";
+     private static final String zipSeparator = "!/";
+ 
++    /**
++     * Post-constructor hook for GmsCompat
++     * @hide
++     */
++    @CorePlatformApi
++    public static volatile Function<DexPathList, ByteBuffer[]> postConstructorBufferHook;
++
+     /** class definition context */
+     @UnsupportedAppUsage
+     private final ClassLoader definingContext;
+@@ -187,6 +198,18 @@ public final class DexPathList {
+         } else {
+             dexElementsSuppressedExceptions = null;
+         }
++
++        runGmsCompatHook();
++    }
++
++    private void runGmsCompatHook() {
++        if (postConstructorBufferHook != null) {
++            ByteBuffer[] buffers = postConstructorBufferHook.apply(this);
++            if (buffers != null) {
++                dexElements = null;
++                initByteBufferDexPath(buffers);
++            }
++        }
+     }
+ 
+     @Override public String toString() {
+diff --git a/mmodules/core_platform_api/api/platform/current-api.txt b/mmodules/core_platform_api/api/platform/current-api.txt
+index 15a0a48d8c..bba378c19d 100644
+--- a/mmodules/core_platform_api/api/platform/current-api.txt
++++ b/mmodules/core_platform_api/api/platform/current-api.txt
+@@ -585,6 +585,7 @@ package dalvik.system {
+ 
+   public final class DelegateLastClassLoader extends dalvik.system.PathClassLoader {
+     ctor public DelegateLastClassLoader(String, String, ClassLoader, ClassLoader[]);
++    field public static volatile java.util.function.Function<java.lang.String,java.lang.String> librarySearchPathHook;
+   }
+ 
+   @Deprecated public final class DexFile {
+@@ -611,6 +612,10 @@ package dalvik.system {
+     method @Deprecated public String getStatus();
+   }
+ 
++  public final class DexPathList {
++    field public static volatile java.util.function.Function<dalvik.system.DexPathList,java.nio.ByteBuffer[]> postConstructorBufferHook;
++  }
++
+   public class PathClassLoader extends dalvik.system.BaseDexClassLoader {
+     ctor public PathClassLoader(String, String, ClassLoader, ClassLoader[]);
+   }
+@@ -759,6 +764,10 @@ package dalvik.system {
+ 
+ package java.io {
+ 
++  public class File implements java.lang.Comparable<java.io.File> java.io.Serializable {
++    field public static volatile java.util.function.Function<java.io.File,java.lang.Long> lastModifiedHook;
++  }
++
+   public final class FileDescriptor {
+     method public int getInt$();
+     method public void setInt$(int);
+diff --git a/ojluni/src/main/java/java/io/File.java b/ojluni/src/main/java/java/io/File.java
+index 98956caf87..8e99e6ea61 100644
+--- a/ojluni/src/main/java/java/io/File.java
++++ b/ojluni/src/main/java/java/io/File.java
+@@ -26,6 +26,8 @@
+ 
+ package java.io;
+ 
++import libcore.api.CorePlatformApi;
++
+ import java.net.URI;
+ import java.net.URL;
+ import java.net.MalformedURLException;
+@@ -35,6 +37,8 @@ import java.util.ArrayList;
+ import java.security.AccessController;
+ import java.nio.file.Path;
+ import java.nio.file.FileSystems;
++import java.util.function.Function;
++
+ import sun.security.action.GetPropertyAction;
+ 
+ // Android-added: Info about UTF-8 usage in filenames.
+@@ -161,6 +165,13 @@ public class File
+      */
+     private static final FileSystem fs = DefaultFileSystem.getFileSystem();
+ 
++    /**
++     * File#lastModified() hook for GmsCompat
++     * @hide
++     */
++    @CorePlatformApi
++    public static volatile Function<File, Long> lastModifiedHook;
++
+     /**
+      * This abstract pathname's normalized pathname string. A normalized
+      * pathname string uses the default name-separator character and does not
+@@ -936,6 +947,12 @@ public class File
+         if (isInvalid()) {
+             return 0L;
+         }
++        if (lastModifiedHook != null) {
++            Long lastModified = lastModifiedHook.apply(this);
++            if (lastModified != null) {
++                return lastModified;
++            }
++        }
+         return fs.getLastModifiedTime(this);
+     }
+ 
+-- 
+2.33.0
+

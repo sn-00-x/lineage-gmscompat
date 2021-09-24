@@ -1,0 +1,114 @@
+From 7e71cf7b981722111b8e5d4dd92fdf8fc7b156f1 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Sat, 10 Jul 2021 00:45:36 -0700
+Subject: [PATCH 02/34] gmscompat: Enable compatibility change for GMS apps
+
+This overrides the default disabled state for the compatibility change
+and enables it automatically by checking package names and signatures.
+
+The enabled state can still be overridden on a per-package basis, but
+that's not currently exposed for non-debuggable apps.
+
+Change-Id: I86f908e227a4e2ca98940f19ba6227fbd5aaf1d1
+---
+ .../android/app/compat/gms/GmsCompat.java     | 38 ++++++++++++++++++-
+ .../android/server/compat/CompatChange.java   |  4 ++
+ 2 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/core/java/android/app/compat/gms/GmsCompat.java b/core/java/android/app/compat/gms/GmsCompat.java
+index a7a6b19d9d8a..d4b3aa0b248e 100644
+--- a/core/java/android/app/compat/gms/GmsCompat.java
++++ b/core/java/android/app/compat/gms/GmsCompat.java
+@@ -21,10 +21,17 @@ import android.app.ActivityThread;
+ import android.compat.Compatibility;
+ import android.compat.annotation.ChangeId;
+ import android.compat.annotation.Disabled;
++import android.content.pm.ApplicationInfo;
++import android.content.pm.IPackageManager;
++import android.content.pm.PackageInfo;
++import android.content.pm.PackageManager;
+ import android.content.pm.Signature;
+ import android.os.Process;
++import android.os.RemoteException;
++import android.os.UserHandle;
+ import android.util.Log;
+ 
++import com.android.internal.compat.CompatibilityChangeInfo;
+ import com.android.internal.gmscompat.GmsInfo;
+ 
+ /**
+@@ -55,7 +62,7 @@ public final class GmsCompat {
+      * randomly-generated long.
+      */
+     @ChangeId
+-    @Disabled
++    @Disabled // Overridden as a special case in CompatChange
+     private static final long GMS_UNPRIVILEGED_COMPAT = 1531297613045645771L;
+ 
+     private static final boolean DEBUG_VERBOSE = false;
+@@ -103,7 +110,7 @@ public final class GmsCompat {
+ 
+         // Validate signature to avoid affecting apps like microG and Gcam Services Provider.
+         // This isn't actually necessary from a security perspective because GMS doesn't get any
+-        // special privileges.
++        // special privileges, but it's a failsafe to avoid unintentional compatibility issues.
+         boolean validCert = false;
+         for (Signature signature : signatures) {
+             if (signature.toCharsString().equals(GmsInfo.SIGNING_CERT)) {
+@@ -113,4 +120,31 @@ public final class GmsCompat {
+ 
+         return validCert;
+     }
++
++    /** @hide */
++    // CompatChange#isEnabled(ApplicationInfo)
++    public static boolean isChangeEnabled(CompatibilityChangeInfo change, ApplicationInfo app) {
++        // Privileged GMS doesn't need any compatibility changes
++        if (change.getId() != GMS_UNPRIVILEGED_COMPAT || app.isSystemApp()) {
++            return false;
++        }
++
++        int userId = UserHandle.getUserId(app.uid);
++        IPackageManager pm = ActivityThread.getPackageManager();
++
++        // Fetch PackageInfo to get signing certificates
++        PackageInfo pkg;
++        try {
++            pkg = pm.getPackageInfo(app.packageName, PackageManager.GET_SIGNING_CERTIFICATES, userId);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++
++        // Get all applicable certificates, even if GMS switches to multiple signing certificates
++        // in the future
++        Signature[] signatures = pkg.signingInfo.hasMultipleSigners() ?
++                pkg.signingInfo.getApkContentsSigners() :
++                pkg.signingInfo.getSigningCertificateHistory();
++        return isGmsApp(app.packageName, signatures);
++    }
+ }
+diff --git a/services/core/java/com/android/server/compat/CompatChange.java b/services/core/java/com/android/server/compat/CompatChange.java
+index 2e9818d15963..bf1c11d0b122 100644
+--- a/services/core/java/com/android/server/compat/CompatChange.java
++++ b/services/core/java/com/android/server/compat/CompatChange.java
+@@ -17,6 +17,7 @@
+ package com.android.server.compat;
+ 
+ import android.annotation.Nullable;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.ChangeId;
+ import android.compat.annotation.EnabledAfter;
+ import android.content.pm.ApplicationInfo;
+@@ -142,6 +143,9 @@ public final class CompatChange extends CompatibilityChangeInfo {
+         if (mPackageOverrides != null && mPackageOverrides.containsKey(app.packageName)) {
+             return mPackageOverrides.get(app.packageName);
+         }
++        if (GmsCompat.isChangeEnabled(this, app)) {
++            return true;
++        }
+         if (getDisabled()) {
+             return false;
+         }
+-- 
+2.33.0
+

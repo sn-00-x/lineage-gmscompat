@@ -1,0 +1,27 @@
+From 79d8188f998f36126d3eadf57f64180b20848973 Mon Sep 17 00:00:00 2001
+From: Daniel Micay <danielmicay@gmail.com>
+Date: Sun, 18 Jul 2021 15:56:20 -0400
+Subject: [PATCH 13/34] gmscompat: add hook for isIccLockEnabled
+
+---
+ telephony/java/android/telephony/TelephonyManager.java | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/telephony/java/android/telephony/TelephonyManager.java b/telephony/java/android/telephony/TelephonyManager.java
+index 8bf2d41289b3..1f698bf6f505 100644
+--- a/telephony/java/android/telephony/TelephonyManager.java
++++ b/telephony/java/android/telephony/TelephonyManager.java
+@@ -13321,6 +13321,10 @@ public class TelephonyManager {
+     @RequiresPermission(android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE)
+     @SystemApi
+     public boolean isIccLockEnabled() {
++        if (GmsCompat.isEnabled()) {
++            return false;
++        }
++
+         try {
+             ITelephony telephony = getITelephony();
+             if (telephony != null) {
+-- 
+2.33.0
+

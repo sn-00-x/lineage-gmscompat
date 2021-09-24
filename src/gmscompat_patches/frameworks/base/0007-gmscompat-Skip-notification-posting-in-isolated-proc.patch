@@ -1,0 +1,60 @@
+From 547eb183969c7c7849557c803dc63adc02200474 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Mon, 12 Jul 2021 17:18:48 -0700
+Subject: [PATCH 07/34] gmscompat: Skip notification posting in isolated
+ processes
+
+In some cases, our service hook runs in isolated processes (e.g.
+sandboxed WebView services) and crashes because NotificationManager
+isn't available in that context:
+
+FATAL EXCEPTION: main
+Process: com.android.webview:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0, PID: 6722
+java.lang.RuntimeException: Unable to create service org.chromium.content.app.SandboxedProcessService0: java.lang.NullPointerException: Attempt to invoke interface method 'void android.app.INotificationManager.createNotificationChannels(java.lang.String, android.content.pm.ParceledListSlice)' on a null object reference
+	at android.app.ActivityThread.handleCreateService(ActivityThread.java:4201)
+	at android.app.ActivityThread.access$1500(ActivityThread.java:239)
+	at android.app.ActivityThread$H.handleMessage(ActivityThread.java:1934)
+	at android.os.Handler.dispatchMessage(Handler.java:106)
+	at android.os.Looper.loop(Looper.java:223)
+	at android.app.ActivityThread.main(ActivityThread.java:7668)
+	at java.lang.reflect.Method.invoke(Native Method)
+	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:592)
+	at com.android.internal.os.ChildZygoteInit.runZygoteServer(ChildZygoteInit.java:136)
+	at com.android.internal.os.WebViewZygoteInit.main(WebViewZygoteInit.java:147)
+	at java.lang.reflect.Method.invoke(Native Method)
+	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:592)
+	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:954)
+Caused by: java.lang.NullPointerException: Attempt to invoke interface method 'void android.app.INotificationManager.createNotificationChannels(java.lang.String, android.content.pm.ParceledListSlice)' on a null object reference
+	at android.app.NotificationManager.createNotificationChannels(NotificationManager.java:834)
+	at android.app.NotificationManager.createNotificationChannel(NotificationManager.java:822)
+	at com.android.internal.gmscompat.GmsHooks.createFgsChannel(GmsHooks.java:83)
+	at com.android.internal.gmscompat.GmsHooks.attachService(GmsHooks.java:102)
+	at android.app.ActivityThread.handleCreateService(ActivityThread.java:4188)
+	... 12 more
+
+Isolated services don't need a foreground notification anyway, so just
+skip the hook.
+
+Change-Id: I0a8b161d3f2758949d02f3d28b25f9eae1b03c3c
+---
+ core/java/com/android/internal/gmscompat/GmsHooks.java | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index 27a8e13ab171..2b9224d45560 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -74,7 +74,9 @@ public final class GmsHooks {
+     // Post notification on foreground service start
+     // ActivityThread#handleCreateService(CreateServiceData)
+     public static void attachService(Service service) {
+-        if (!GmsCompat.isEnabled()) {
++        // Isolated processes (e.g. WebView) don't have access to NotificationManager. They don't
++        // need a foreground notification anyway, so bail out early.
++        if (!GmsCompat.isEnabled() || Process.isIsolated()) {
+             return;
+         }
+ 
+-- 
+2.33.0
+

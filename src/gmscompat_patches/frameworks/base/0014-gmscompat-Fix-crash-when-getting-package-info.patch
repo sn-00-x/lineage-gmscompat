@@ -1,0 +1,86 @@
+From 95aae29df915f1ed7f4b50f15b7b81c2197640f6 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Sun, 18 Jul 2021 16:28:31 -0700
+Subject: [PATCH 14/34] gmscompat: Fix crash when getting package info
+
+Sometimes, ActivityManagerService will call GmsCompat#isGmsApp on
+ApplicationInfo instances not assigned to the calling user while
+handling IPC calls. Allow it to do this by using system_server's
+credentials for the PackageInfo signature check.
+
+This fixes the following crash:
+
+FATAL EXCEPTION: AsyncTask #1
+Process: com.android.settings.intelligence, PID: 9551
+java.lang.RuntimeException: An error occurred while executing doInBackground()
+	at android.os.AsyncTask$4.done(AsyncTask.java:415)
+	at java.util.concurrent.FutureTask.finishCompletion(FutureTask.java:383)
+	at java.util.concurrent.FutureTask.setException(FutureTask.java:252)
+	at java.util.concurrent.FutureTask.run(FutureTask.java:271)
+	at android.os.AsyncTask$SerialExecutor$1.run(AsyncTask.java:305)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1167)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:641)
+	at java.lang.Thread.run(Thread.java:923)
+Caused by: java.lang.SecurityException: You need INTERACT_ACROSS_USERS or MANAGE_USERS permission to: check isUserUnlockingOrUnlocked
+	at android.os.Parcel.createExceptionOrNull(Parcel.java:2373)
+	at android.os.Parcel.createException(Parcel.java:2357)
+	at android.os.Parcel.readException(Parcel.java:2340)
+	at android.os.Parcel.readException(Parcel.java:2282)
+	at android.app.IActivityManager$Stub$Proxy.getContentProvider(IActivityManager.java:5728)
+	at android.app.ActivityThread.acquireProvider(ActivityThread.java:6822)
+	at android.app.ContextImpl$ApplicationContentResolver.acquireUnstableProvider(ContextImpl.java:2941)
+	at android.content.ContentResolver.acquireUnstableProvider(ContentResolver.java:2481)
+	at android.content.ContentResolver.query(ContentResolver.java:1167)
+	at android.content.ContentResolver.query(ContentResolver.java:1115)
+	at android.content.ContentResolver.query(ContentResolver.java:1071)
+	at com.android.settings.intelligence.search.indexing.PreIndexDataCollector.getIndexablesForXmlResourceUri(PreIndexDataCollector.java:136)
+	at com.android.settings.intelligence.search.indexing.PreIndexDataCollector.addIndexablesFromRemoteProvider(PreIndexDataCollector.java:114)
+	at com.android.settings.intelligence.search.indexing.PreIndexDataCollector.collectIndexableData(PreIndexDataCollector.java:94)
+	at com.android.settings.intelligence.search.indexing.DatabaseIndexingManager.getIndexDataFromProviders(DatabaseIndexingManager.java:127)
+	at com.android.settings.intelligence.search.indexing.DatabaseIndexingManager.performIndexing(DatabaseIndexingManager.java:111)
+	at com.android.settings.intelligence.search.indexing.DatabaseIndexingManager$IndexingTask.doInBackground(DatabaseIndexingManager.java:341)
+	at com.android.settings.intelligence.search.indexing.DatabaseIndexingManager$IndexingTask.doInBackground(DatabaseIndexingManager.java:323)
+	at android.os.AsyncTask$3.call(AsyncTask.java:394)
+	at java.util.concurrent.FutureTask.run(FutureTask.java:266)
+	... 4 more
+Caused by: android.os.RemoteException: Remote stack trace:
+	at com.android.server.pm.UserManagerService.checkManageOrInteractPermissionIfCallerInOtherProfileGroup(UserManagerService.java:1513)
+	at com.android.server.pm.UserManagerService.isUserUnlockingOrUnlocked(UserManagerService.java:1451)
+	at com.android.server.pm.PackageManagerService.updateFlags(PackageManagerService.java:5235)
+	at com.android.server.pm.PackageManagerService.updateFlagsForPackage(PackageManagerService.java:5265)
+	at com.android.server.pm.PackageManagerService.getPackageInfoInternal(PackageManagerService.java:4528)
+
+Change-Id: Ic448b46f5c4a8799bd849b2a69ec03814ed7ad44
+---
+ core/java/android/app/compat/gms/GmsCompat.java | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/core/java/android/app/compat/gms/GmsCompat.java b/core/java/android/app/compat/gms/GmsCompat.java
+index 611461e3a839..2b35ad7f1661 100644
+--- a/core/java/android/app/compat/gms/GmsCompat.java
++++ b/core/java/android/app/compat/gms/GmsCompat.java
+@@ -26,6 +26,7 @@ import android.content.pm.IPackageManager;
+ import android.content.pm.PackageInfo;
+ import android.content.pm.PackageManager;
+ import android.content.pm.Signature;
++import android.os.Binder;
+ import android.os.Process;
+ import android.os.RemoteException;
+ import android.os.UserHandle;
+@@ -133,10 +134,13 @@ public final class GmsCompat {
+ 
+         // Fetch PackageInfo to get signing certificates
+         PackageInfo pkg;
++        long token = Binder.clearCallingIdentity();
+         try {
+             pkg = pm.getPackageInfo(app.packageName, PackageManager.GET_SIGNING_CERTIFICATES, userId);
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
++        } finally {
++            Binder.restoreCallingIdentity(token);
+         }
+ 
+         // Get all applicable certificates, even if GMS switches to multiple signing certificates
+-- 
+2.33.0
+

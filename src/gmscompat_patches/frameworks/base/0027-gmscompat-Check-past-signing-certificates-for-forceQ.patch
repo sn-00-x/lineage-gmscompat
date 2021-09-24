@@ -1,0 +1,107 @@
+From 2a3b5e2e8f9a8c2f9144e7de5d61b973a3ddaab0 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Wed, 18 Aug 2021 01:23:35 -0700
+Subject: [PATCH 27/34] gmscompat: Check past signing certificates for
+ forceQueryable
+
+The force queryable check in AppsFilter calls isGmsApp with the
+*current* APK signatures, which works for some Google apps. However,
+Google Services Framework (com.google.android.gsf) has a v3 signature
+that uses a new certificate, so the legacy MD5 certificate we check for
+is classified as a past signing certificate instead. As a result,
+forceQueryable is never set for GSF because it fails the isGmsApp check.
+
+Account for both current and past signing certificates in the AppsFilter
+path in order to fix the issue.
+
+Change-Id: Id4f4002dcc4882e986707c9e02b970246ee62d77
+---
+ .../android/app/compat/gms/GmsCompat.java     | 28 +++++++++++++------
+ .../com/android/server/pm/AppsFilter.java     |  9 ++++--
+ 2 files changed, 26 insertions(+), 11 deletions(-)
+
+diff --git a/core/java/android/app/compat/gms/GmsCompat.java b/core/java/android/app/compat/gms/GmsCompat.java
+index 7802a84a06ab..60c09fa766a8 100644
+--- a/core/java/android/app/compat/gms/GmsCompat.java
++++ b/core/java/android/app/compat/gms/GmsCompat.java
+@@ -128,13 +128,23 @@ public final class GmsCompat {
+         isDynamiteClientEnabled = isChangeEnabled("GMS_UNPRIVILEGED_DYNAMITE_CLIENT", GMS_UNPRIVILEGED_DYNAMITE_CLIENT);
+     }
+ 
++    private static boolean validateCerts(Signature[] signatures) {
++        for (Signature signature : signatures) {
++            if (signature.toCharsString().equals(GmsInfo.SIGNING_CERT)) {
++                return true;
++            }
++        }
++
++        return false;
++    }
++
+     /**
+      * Check whether the given app is unprivileged and part of the Google Play Services family.
+      *
+      * @hide
+      */
+-    public static boolean isGmsApp(String packageName, Signature[] signatures, boolean isPrivileged,
+-            String sharedUserId) {
++    public static boolean isGmsApp(String packageName, Signature[] signatures,
++            Signature[] signatures2, boolean isPrivileged, String sharedUserId) {
+         // Privileged GMS doesn't need any compatibility changes
+         if (isPrivileged) {
+             return false;
+@@ -153,11 +163,13 @@ public final class GmsCompat {
+         // Validate signature to avoid affecting apps like microG and Gcam Services Provider.
+         // This isn't actually necessary from a security perspective because GMS doesn't get any
+         // special privileges, but it's a failsafe to avoid unintentional compatibility issues.
+-        boolean validCert = false;
+-        for (Signature signature : signatures) {
+-            if (signature.toCharsString().equals(GmsInfo.SIGNING_CERT)) {
+-                validCert = true;
+-            }
++        boolean validCert = validateCerts(signatures);
++
++        // Try past signing certificates if necessary. We iterate through two separate arrays here
++        // instead of concatenating them beforehand because this method gets called for every
++        // package on the system at boot, and thus needs to be efficient.
++        if (!validCert && signatures2 != null) {
++            validCert = validateCerts(signatures2);
+         }
+ 
+         return validCert;
+@@ -184,7 +196,7 @@ public final class GmsCompat {
+         Signature[] signatures = pkg.signingInfo.hasMultipleSigners() ?
+                 pkg.signingInfo.getApkContentsSigners() :
+                 pkg.signingInfo.getSigningCertificateHistory();
+-        return isGmsApp(app.packageName, signatures, app.isPrivilegedApp(), pkg.sharedUserId);
++        return isGmsApp(app.packageName, signatures, null, app.isPrivilegedApp(), pkg.sharedUserId);
+     }
+ 
+     private static boolean isGmsInstalled(ApplicationInfo relatedApp) {
+diff --git a/services/core/java/com/android/server/pm/AppsFilter.java b/services/core/java/com/android/server/pm/AppsFilter.java
+index 9e989c3a4dd5..94774e9515fc 100644
+--- a/services/core/java/com/android/server/pm/AppsFilter.java
++++ b/services/core/java/com/android/server/pm/AppsFilter.java
+@@ -565,13 +565,16 @@ public class AppsFilter {
+             mQueriesViaComponentRequireRecompute = true;
+         }
+ 
++        final boolean isGmsApp = GmsCompat.isGmsApp(newPkg.getPackageName(),
++                newPkg.getSigningDetails().signatures,
++                newPkg.getSigningDetails().pastSigningCertificates,
++                newPkg.isPrivileged(),
++                newPkgSetting.sharedUser != null ? newPkgSetting.sharedUser.name : null);
+         final boolean newIsForceQueryable =
+                 mForceQueryable.contains(newPkgSetting.appId)
+                         /* shared user that is already force queryable */
+                         || newPkgSetting.forceQueryableOverride /* adb override */
+-                        || GmsCompat.isGmsApp(newPkg.getPackageName(),
+-                            newPkg.getSigningDetails().signatures, newPkg.isPrivileged(),
+-                            newPkgSetting.sharedUser != null ? newPkgSetting.sharedUser.name : null)
++                        || isGmsApp
+                         || (newPkgSetting.isSystem() && (mSystemAppsQueryable
+                         || newPkg.isForceQueryable()
+                         || ArrayUtils.contains(mForceQueryableByDevicePackageNames,
+-- 
+2.33.0
+

@@ -1,0 +1,31 @@
+From e2658d1a8ba06d2b9fd16e7977d02286f994d0e4 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Mon, 2 Aug 2021 03:32:40 -0700
+Subject: [PATCH 22/34] gmscompat: dynamite: Create proxy service with
+ application context
+
+We don't currently keep any Context references in the service, but this
+is still more future-proof for avoiding memory leaks.
+
+Change-Id: I09930e751498125d96a2002ec470065947b74e66
+---
+ .../internal/gmscompat/dynamite/server/FileProxyProvider.java  | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyProvider.java b/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyProvider.java
+index c39bf23bc734..b7eae2bbc289 100644
+--- a/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyProvider.java
++++ b/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyProvider.java
+@@ -48,7 +48,8 @@ public final class FileProxyProvider extends BroadcastReceiver {
+         }
+ 
+         if (service == null) {
+-            service = new FileProxyService(context);
++            // The service is a singleton, so use the application context to prevent memory leaks.
++            service = new FileProxyService(context.getApplicationContext());
+         }
+ 
+         Intent reply = new Intent(ACTION_RESPONSE);
+-- 
+2.33.0
+

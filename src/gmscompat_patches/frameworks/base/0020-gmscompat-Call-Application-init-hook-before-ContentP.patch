@@ -1,0 +1,63 @@
+From 4468534560d25d2aab9aa4cb5d399a5b61de49ee Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Sun, 1 Aug 2021 17:20:11 -0700
+Subject: [PATCH 20/34] gmscompat: Call Application init hook before
+ ContentProvider installation
+
+For correctness, we need to install hooks before any application code
+starts to run (except the Application constructor, which typically
+doesn't do anything special) because ContentProviders are installed
+before Application#onCreate().
+
+Change-Id: I50129b198c00cca30e546d5d532098f704202db0
+---
+ core/java/android/app/Instrumentation.java             | 3 ++-
+ core/java/com/android/internal/gmscompat/GmsHooks.java | 4 ----
+ 2 files changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/core/java/android/app/Instrumentation.java b/core/java/android/app/Instrumentation.java
+index 3d38d5ebbbdb..eb9339529fee 100644
+--- a/core/java/android/app/Instrumentation.java
++++ b/core/java/android/app/Instrumentation.java
+@@ -1159,6 +1159,7 @@ public class Instrumentation {
+         Application app = getFactory(context.getPackageName())
+                 .instantiateApplication(cl, className);
+         app.attach(context);
++        GmsHooks.initApplicationBeforeOnCreate(app);
+         return app;
+     }
+     
+@@ -1176,6 +1177,7 @@ public class Instrumentation {
+             ClassNotFoundException {
+         Application app = (Application)clazz.newInstance();
+         app.attach(context);
++        GmsHooks.initApplicationBeforeOnCreate(app);
+         return app;
+     }
+ 
+@@ -1191,7 +1193,6 @@ public class Instrumentation {
+      * @param app The application being created.
+      */
+     public void callApplicationOnCreate(Application app) {
+-        GmsHooks.initApplicationBeforeOnCreate(app);
+         app.onCreate();
+     }
+     
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index 52a7145eed02..57ca25a450ba 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -198,10 +198,6 @@ public final class GmsHooks {
+     // directory is not supported. https://crbug.com/558377
+     // Instrumentation#newApplication(ClassLoader, String, Context)
+     public static void initApplicationBeforeOnCreate(Application app) {
+-        if (app == null) {
+-            return;
+-        }
+-
+         if (GmsCompat.isEnabled()) {
+             String processName = Application.getProcessName();
+             if (!app.getPackageName().equals(processName)) {
+-- 
+2.33.0
+

@@ -1,0 +1,802 @@
+From 443b87703dfe29ea21e25a627820d367dfdc354a Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Thu, 8 Jul 2021 03:19:08 -0700
+Subject: [PATCH 08/34] gmscompat: Add baseline compatibility for unprivileged
+ Play Services
+
+Tested functionality:
+  - Account login (including 2FA with NFC security key)
+  - Play Store
+  - Firebase Cloud Messaging (Signal, Discord, Slack, Gmail)
+  - Firebase database API (Swift Backup)
+  - Firebase app indexing (GMS debug settings)
+  - Google Play Games
+  - Account settings
+  - Google My Account
+  - Autofill
+  - SMS verification receiver (Signal)
+  - Play license verification (both in-app purchases and paid apps)
+  - Play Store app purchases
+
+Known issues:
+  - Play feature delivery
+  - SafetyNet doesn't pass
+
+To open Play Services and account settings:
+      am start com.google.android.gms/.app.settings.GoogleSettingsIALink
+
+Change-Id: I80c702ac47590d28c86cd1a63a7765670ec9e045
+---
+ core/java/android/app/ActivityManager.java    |  6 ++
+ .../app/ApplicationPackageManager.java        | 14 +++
+ core/java/android/app/Instrumentation.java    |  3 +
+ .../java/android/app/NotificationManager.java |  6 ++
+ .../app/admin/DevicePolicyManager.java        | 17 ++++
+ .../hardware/location/ContextHubManager.java  | 11 +++
+ .../java/android/net/ConnectivityManager.java |  5 ++
+ .../java/android/net/NetworkScoreManager.java | 13 +++
+ core/java/android/os/Build.java               |  7 ++
+ core/java/android/os/UserManager.java         | 26 ++++++
+ core/java/android/provider/Settings.java      |  5 ++
+ .../android/internal/gmscompat/GmsHooks.java  | 86 +++++++++++++++++++
+ .../android/location/LocationManager.java     |  5 ++
+ .../server/am/ActivityManagerService.java     |  5 ++
+ .../android/telephony/TelephonyManager.java   | 29 +++++++
+ wifi/java/android/net/wifi/WifiManager.java   | 17 ++++
+ 16 files changed, 255 insertions(+)
+
+diff --git a/core/java/android/app/ActivityManager.java b/core/java/android/app/ActivityManager.java
+index 1059a6f2e868..1d7c17fbe25d 100644
+--- a/core/java/android/app/ActivityManager.java
++++ b/core/java/android/app/ActivityManager.java
+@@ -29,6 +29,7 @@ import android.annotation.RequiresPermission;
+ import android.annotation.SystemApi;
+ import android.annotation.SystemService;
+ import android.annotation.TestApi;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.ComponentName;
+ import android.content.Context;
+@@ -79,6 +80,7 @@ import android.window.WindowContainerToken;
+ 
+ import com.android.internal.app.LocalePicker;
+ import com.android.internal.app.procstats.ProcessStats;
++import com.android.internal.gmscompat.GmsHooks;
+ import com.android.internal.os.RoSystemProperties;
+ import com.android.internal.os.TransferPipe;
+ import com.android.internal.util.FastPrintWriter;
+@@ -4304,6 +4306,10 @@ public class ActivityManager {
+             "android.permission.INTERACT_ACROSS_USERS_FULL"
+     })
+     public static int getCurrentUser() {
++        if (GmsCompat.isEnabled()) {
++            return GmsHooks.getCurrentUser();
++        }
++
+         UserInfo ui;
+         try {
+             ui = getService().getCurrentUser();
+diff --git a/core/java/android/app/ApplicationPackageManager.java b/core/java/android/app/ApplicationPackageManager.java
+index c9031b711657..d3c6639b7a55 100644
+--- a/core/java/android/app/ApplicationPackageManager.java
++++ b/core/java/android/app/ApplicationPackageManager.java
+@@ -22,6 +22,7 @@ import android.annotation.Nullable;
+ import android.annotation.StringRes;
+ import android.annotation.UserIdInt;
+ import android.annotation.XmlRes;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.ComponentName;
+ import android.content.ContentResolver;
+@@ -101,6 +102,7 @@ import android.view.Display;
+ import com.android.internal.annotations.GuardedBy;
+ import com.android.internal.annotations.Immutable;
+ import com.android.internal.annotations.VisibleForTesting;
++import com.android.internal.gmscompat.GmsHooks;
+ import com.android.internal.os.SomeArgs;
+ import com.android.internal.util.UserIcons;
+ 
+@@ -181,6 +183,8 @@ public class ApplicationPackageManager extends PackageManager {
+     @Override
+     public PackageInfo getPackageInfo(VersionedPackage versionedPackage, int flags)
+             throws NameNotFoundException {
++        flags = GmsHooks.getPackageInfoFlags(flags);
++
+         final int userId = getUserId();
+         try {
+             PackageInfo pi = mPM.getPackageInfoVersioned(versionedPackage,
+@@ -197,6 +201,8 @@ public class ApplicationPackageManager extends PackageManager {
+     @Override
+     public PackageInfo getPackageInfoAsUser(String packageName, int flags, int userId)
+             throws NameNotFoundException {
++        flags = GmsHooks.getPackageInfoFlags(flags);
++
+         PackageInfo pi =
+                 getPackageInfoAsUserCached(
+                         packageName,
+@@ -537,6 +543,10 @@ public class ApplicationPackageManager extends PackageManager {
+     @Override
+     @SuppressWarnings("unchecked")
+     public @NonNull List<SharedLibraryInfo> getSharedLibrariesAsUser(int flags, int userId) {
++        if (GmsCompat.isEnabled()) {
++            return GmsHooks.getSharedLibrariesAsUser();
++        }
++
+         try {
+             ParceledListSlice<SharedLibraryInfo> sharedLibs = mPM.getSharedLibraries(
+                     mContext.getOpPackageName(), flags, userId);
+@@ -1726,6 +1736,10 @@ public class ApplicationPackageManager extends PackageManager {
+ 
+     @Override
+     public void addOnPermissionsChangeListener(OnPermissionsChangedListener listener) {
++        if (GmsCompat.isEnabled()) {
++            return;
++        }
++
+         synchronized (mPermissionListeners) {
+             if (mPermissionListeners.get(listener) != null) {
+                 return;
+diff --git a/core/java/android/app/Instrumentation.java b/core/java/android/app/Instrumentation.java
+index 721525d9af9d..3d38d5ebbbdb 100644
+--- a/core/java/android/app/Instrumentation.java
++++ b/core/java/android/app/Instrumentation.java
+@@ -57,6 +57,8 @@ import android.view.WindowManagerGlobal;
+ 
+ import com.android.internal.content.ReferrerIntent;
+ 
++import com.android.internal.gmscompat.GmsHooks;
++
+ import java.io.File;
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
+@@ -1189,6 +1191,7 @@ public class Instrumentation {
+      * @param app The application being created.
+      */
+     public void callApplicationOnCreate(Application app) {
++        GmsHooks.initApplicationBeforeOnCreate(app);
+         app.onCreate();
+     }
+     
+diff --git a/core/java/android/app/NotificationManager.java b/core/java/android/app/NotificationManager.java
+index eef9c022fda8..a37f80849c7f 100644
+--- a/core/java/android/app/NotificationManager.java
++++ b/core/java/android/app/NotificationManager.java
+@@ -51,6 +51,8 @@ import android.service.notification.ZenPolicy;
+ import android.util.Log;
+ import android.util.proto.ProtoOutputStream;
+ 
++import com.android.internal.gmscompat.GmsHooks;
++
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
+ import java.util.ArrayList;
+@@ -901,6 +903,10 @@ public class NotificationManager {
+      * had before it was deleted.
+      */
+     public void deleteNotificationChannel(String channelId) {
++        if (GmsHooks.skipDeleteNotificationChannel(channelId)) {
++            return;
++        }
++
+         INotificationManager service = getService();
+         try {
+             service.deleteNotificationChannel(mContext.getPackageName(), channelId);
+diff --git a/core/java/android/app/admin/DevicePolicyManager.java b/core/java/android/app/admin/DevicePolicyManager.java
+index ecd0e65b8921..caf9d6bb1fb4 100644
+--- a/core/java/android/app/admin/DevicePolicyManager.java
++++ b/core/java/android/app/admin/DevicePolicyManager.java
+@@ -40,6 +40,7 @@ import android.app.Activity;
+ import android.app.IServiceConnection;
+ import android.app.KeyguardManager;
+ import android.app.admin.SecurityLog.SecurityEvent;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.ComponentName;
+ import android.content.Context;
+@@ -6572,6 +6573,10 @@ public class DevicePolicyManager {
+     @SystemApi
+     @RequiresPermission(android.Manifest.permission.MANAGE_USERS)
+     public ComponentName getDeviceOwnerComponentOnAnyUser() {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         return getDeviceOwnerComponentInner(/* callingUserOnly =*/ false);
+     }
+ 
+@@ -6707,6 +6712,10 @@ public class DevicePolicyManager {
+     @SystemApi
+     @RequiresPermission(android.Manifest.permission.MANAGE_USERS)
+     public String getDeviceOwnerNameOnAnyUser() {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         throwIfParentInstance("getDeviceOwnerNameOnAnyUser");
+         if (mService != null) {
+             try {
+@@ -7097,6 +7106,10 @@ public class DevicePolicyManager {
+     @SystemApi
+     @RequiresPermission(android.Manifest.permission.MANAGE_USERS)
+     public @Nullable String getProfileOwnerNameAsUser(int userId) throws IllegalArgumentException {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         throwIfParentInstance("getProfileOwnerNameAsUser");
+         if (mService != null) {
+             try {
+@@ -10584,6 +10597,10 @@ public class DevicePolicyManager {
+     @SystemApi
+     @RequiresPermission(android.Manifest.permission.MANAGE_USERS)
+     public boolean isDeviceProvisioned() {
++        if (GmsCompat.isEnabled()) {
++            return true;
++        }
++
+         try {
+             return mService.isDeviceProvisioned();
+         } catch (RemoteException re) {
+diff --git a/core/java/android/hardware/location/ContextHubManager.java b/core/java/android/hardware/location/ContextHubManager.java
+index 1ed791d66f74..2cca58608191 100644
+--- a/core/java/android/hardware/location/ContextHubManager.java
++++ b/core/java/android/hardware/location/ContextHubManager.java
+@@ -25,6 +25,7 @@ import android.annotation.SuppressLint;
+ import android.annotation.SystemApi;
+ import android.annotation.SystemService;
+ import android.app.PendingIntent;
++import android.app.compat.gms.GmsCompat;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.content.pm.PackageManager;
+@@ -38,6 +39,7 @@ import android.util.Log;
+ 
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
++import java.util.Collections;
+ import java.util.List;
+ import java.util.Objects;
+ import java.util.concurrent.Executor;
+@@ -420,6 +422,10 @@ public final class ContextHubManager {
+             android.Manifest.permission.ACCESS_CONTEXT_HUB
+     })
+     @NonNull public List<ContextHubInfo> getContextHubs() {
++        if (GmsCompat.isEnabled()) {
++            return Collections.emptyList();
++        }
++
+         try {
+             return mService.getContextHubs();
+         } catch (RemoteException e) {
+@@ -958,6 +964,11 @@ public final class ContextHubManager {
+         mMainLooper = mainLooper;
+         mService = IContextHubService.Stub.asInterface(
+                 ServiceManager.getServiceOrThrow(Context.CONTEXTHUB_SERVICE));
++
++        if (GmsCompat.isEnabled()) {
++            return;
++        }
++
+         try {
+             mService.registerCallback(mClientCallback);
+         } catch (RemoteException e) {
+diff --git a/core/java/android/net/ConnectivityManager.java b/core/java/android/net/ConnectivityManager.java
+index ed03f5198d6f..18bbe5fc279f 100644
+--- a/core/java/android/net/ConnectivityManager.java
++++ b/core/java/android/net/ConnectivityManager.java
+@@ -28,6 +28,7 @@ import android.annotation.SystemApi;
+ import android.annotation.SystemService;
+ import android.annotation.TestApi;
+ import android.app.PendingIntent;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.Context;
+ import android.content.Intent;
+@@ -2413,6 +2414,10 @@ public class ConnectivityManager {
+     @RequiresPermission(anyOf = {android.Manifest.permission.TETHER_PRIVILEGED,
+             android.Manifest.permission.WRITE_SETTINGS})
+     public boolean isTetheringSupported() {
++        if (GmsCompat.isEnabled()) {
++            return false;
++        }
++
+         return mTetheringManager.isTetheringSupported();
+     }
+ 
+diff --git a/core/java/android/net/NetworkScoreManager.java b/core/java/android/net/NetworkScoreManager.java
+index a190c473f0a0..62ba8e1aa497 100644
+--- a/core/java/android/net/NetworkScoreManager.java
++++ b/core/java/android/net/NetworkScoreManager.java
+@@ -26,6 +26,7 @@ import android.annotation.SdkConstant;
+ import android.annotation.SdkConstant.SdkConstantType;
+ import android.annotation.SystemApi;
+ import android.annotation.SystemService;
++import android.app.compat.gms.GmsCompat;
+ import android.content.Context;
+ import android.os.Binder;
+ import android.os.RemoteException;
+@@ -247,6 +248,10 @@ public class NetworkScoreManager {
+     @RequiresPermission(anyOf = {android.Manifest.permission.SCORE_NETWORKS,
+                                  android.Manifest.permission.REQUEST_NETWORK_SCORES})
+     public String getActiveScorerPackage() {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         try {
+             return mService.getActiveScorerPackage();
+         } catch (RemoteException e) {
+@@ -448,6 +453,10 @@ public class NetworkScoreManager {
+     @RequiresPermission(android.Manifest.permission.REQUEST_NETWORK_SCORES)
+     public void registerNetworkScoreCache(int networkType, INetworkScoreCache scoreCache,
+             @ScoreUpdateFilter int filterType) {
++        if (GmsCompat.isEnabled()) {
++            return;
++        }
++
+         try {
+             mService.registerNetworkScoreCache(networkType, scoreCache, filterType);
+         } catch (RemoteException e) {
+@@ -467,6 +476,10 @@ public class NetworkScoreManager {
+      */
+     @RequiresPermission(android.Manifest.permission.REQUEST_NETWORK_SCORES)
+     public void unregisterNetworkScoreCache(int networkType, INetworkScoreCache scoreCache) {
++        if (GmsCompat.isEnabled()) {
++            return;
++        }
++
+         try {
+             mService.unregisterNetworkScoreCache(networkType, scoreCache);
+         } catch (RemoteException e) {
+diff --git a/core/java/android/os/Build.java b/core/java/android/os/Build.java
+index 8c6fca50fa8b..93b44a0ab484 100755
+--- a/core/java/android/os/Build.java
++++ b/core/java/android/os/Build.java
+@@ -24,6 +24,7 @@ import android.annotation.SystemApi;
+ import android.annotation.TestApi;
+ import android.app.ActivityThread;
+ import android.app.Application;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.Context;
+ import android.sysprop.TelephonyProperties;
+@@ -31,6 +32,8 @@ import android.text.TextUtils;
+ import android.util.Slog;
+ import android.view.View;
+ 
++import com.android.internal.gmscompat.GmsHooks;
++
+ import dalvik.system.VMRuntime;
+ 
+ import java.util.ArrayList;
+@@ -173,6 +176,10 @@ public class Build {
+     @SuppressAutoDoc // No support for device / profile owner.
+     @RequiresPermission(Manifest.permission.READ_PRIVILEGED_PHONE_STATE)
+     public static String getSerial() {
++        if (GmsCompat.isEnabled()) {
++            return GmsHooks.getSerial();
++        }
++
+         IDeviceIdentifiersPolicyService service = IDeviceIdentifiersPolicyService.Stub
+                 .asInterface(ServiceManager.getService(Context.DEVICE_IDENTIFIERS_SERVICE));
+         try {
+diff --git a/core/java/android/os/UserManager.java b/core/java/android/os/UserManager.java
+index 2465b0e41876..11f1ce399b8d 100644
+--- a/core/java/android/os/UserManager.java
++++ b/core/java/android/os/UserManager.java
+@@ -35,6 +35,7 @@ import android.app.Activity;
+ import android.app.ActivityManager;
+ import android.app.PropertyInvalidatedCache;
+ import android.app.admin.DevicePolicyManager;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.ComponentName;
+ import android.content.Context;
+@@ -56,6 +57,7 @@ import android.util.AndroidException;
+ import android.view.WindowManager.LayoutParams;
+ 
+ import com.android.internal.R;
++import com.android.internal.gmscompat.GmsHooks;
+ import com.android.internal.os.RoSystemProperties;
+ import com.android.internal.util.FrameworkStatsLog;
+ 
+@@ -2030,6 +2032,10 @@ public class UserManager {
+     @RequiresPermission(anyOf = {Manifest.permission.MANAGE_USERS,
+             Manifest.permission.CREATE_USERS})
+     public boolean isGuestUser(@UserIdInt int userId) {
++        if (GmsCompat.isEnabled()) {
++            return false;
++        }
++
+         UserInfo user = getUserInfo(userId);
+         return user != null && user.isGuest();
+     }
+@@ -2044,6 +2050,10 @@ public class UserManager {
+     @RequiresPermission(anyOf = {Manifest.permission.MANAGE_USERS,
+             Manifest.permission.CREATE_USERS})
+     public boolean isGuestUser() {
++        if (GmsCompat.isEnabled()) {
++            return false;
++        }
++
+         UserInfo user = getUserInfo(UserHandle.myUserId());
+         return user != null && user.isGuest();
+     }
+@@ -3169,6 +3179,10 @@ public class UserManager {
+      */
+     @RequiresPermission(android.Manifest.permission.MANAGE_USERS)
+     public int getUserCount() {
++        if (GmsCompat.isEnabled()) {
++            return 1;
++        }
++
+         List<UserInfo> users = getUsers();
+         return users != null ? users.size() : 1;
+     }
+@@ -3244,6 +3258,10 @@ public class UserManager {
+     @SystemApi
+     @RequiresPermission(android.Manifest.permission.MANAGE_USERS)
+     public long[] getSerialNumbersOfUsers(boolean excludeDying) {
++        if (GmsCompat.isEnabled()) {
++            return GmsHooks.getSerialNumbersOfUsers(this);
++        }
++
+         List<UserInfo> users = getUsers(excludeDying);
+         long[] result = new long[users.size()];
+         for (int i = 0; i < result.length; i++) {
+@@ -3560,6 +3578,10 @@ public class UserManager {
+     @UnsupportedAppUsage
+     @RequiresPermission(android.Manifest.permission.MANAGE_USERS)
+     public UserInfo getProfileParent(@UserIdInt int userId) {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         try {
+             return mService.getProfileParent(userId);
+         } catch (RemoteException re) {
+@@ -3579,6 +3601,10 @@ public class UserManager {
+     @SystemApi
+     @RequiresPermission(android.Manifest.permission.MANAGE_USERS)
+     public @Nullable UserHandle getProfileParent(@NonNull UserHandle user) {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         UserInfo info = getProfileParent(user.getIdentifier());
+ 
+         if (info == null) {
+diff --git a/core/java/android/provider/Settings.java b/core/java/android/provider/Settings.java
+index fe61bc37d224..ce780eb32c8b 100755
+--- a/core/java/android/provider/Settings.java
++++ b/core/java/android/provider/Settings.java
+@@ -36,6 +36,7 @@ import android.app.NotificationChannel;
+ import android.app.NotificationManager;
+ import android.app.SearchManager;
+ import android.app.WallpaperManager;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.ComponentName;
+ import android.content.ContentResolver;
+@@ -2650,6 +2651,10 @@ public final class Settings {
+         public boolean putStringForUser(ContentResolver cr, String name, String value,
+                 String tag, boolean makeDefault, final int userHandle,
+                 boolean overrideableByRestore) {
++            if (GmsCompat.isEnabled()) {
++                return true;
++            }
++
+             try {
+                 Bundle arg = new Bundle();
+                 arg.putString(Settings.NameValueTable.VALUE, value);
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index 2b9224d45560..534436a25902 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -16,6 +16,9 @@
+ 
+ package com.android.internal.gmscompat;
+ 
++import android.annotation.SuppressLint;
++import android.app.ActivityThread;
++import android.app.Application;
+ import android.app.Notification;
+ import android.app.NotificationChannel;
+ import android.app.NotificationManager;
+@@ -25,7 +28,17 @@ import android.app.compat.gms.GmsCompat;
+ import android.content.ComponentName;
+ import android.content.Context;
+ import android.content.Intent;
++import android.content.pm.PackageManager;
++import android.content.pm.SharedLibraryInfo;
++import android.os.Build;
++import android.os.Process;
++import android.os.UserManager;
++import android.provider.Settings;
+ import android.util.Log;
++import android.webkit.WebView;
++
++import java.util.Collections;
++import java.util.List;
+ 
+ /**
+  * API shims for Google Play Services compatibility. Hooks that are more complicated than a simple
+@@ -44,6 +57,7 @@ public final class GmsHooks {
+     // Static only
+     private GmsHooks() { }
+ 
++
+     /*
+      * Foreground service notifications to keep GMS services alive
+      */
+@@ -101,4 +115,76 @@ public final class GmsHooks {
+     public static boolean skipDeleteNotificationChannel(String channelId) {
+         return GmsCompat.isEnabled() && FGS_CHANNEL_ID.equals(channelId);
+     }
++
++
++    /**
++     * API shims
++     */
++
++    // Report a single user on the system
++    // UserManager#getSerialNumbersOfUsers(boolean)
++    public static long[] getSerialNumbersOfUsers(UserManager userManager) {
++        return new long[] { userManager.getSerialNumberForUser(Process.myUserHandle()) };
++    }
++
++    // Current user is always active
++    // ActivityManager#getCurrentUser()
++    public static int getCurrentUser() {
++        return Process.myUserHandle().getIdentifier();
++    }
++
++    /**
++     * Use the per-app SSAID as a random serial number for SafetyNet. This doesn't necessarily make
++     * pass, but at least it retusn a valid "failed" response and stops spamming device key
++     * requests.
++     *
++     * This isn't a privacy risk because all unprivileged apps already have access to random SSAIDs.
++     */
++    // Build#getSerial()
++    @SuppressLint("HardwareIds")
++    public static String getSerial() {
++        Application app = ActivityThread.currentApplication();
++        if (app == null) {
++            return Build.UNKNOWN;
++        }
++
++        String ssaid = Settings.Secure.getString(app.getContentResolver(),
++                Settings.Secure.ANDROID_ID);
++        String serial = ssaid.toUpperCase();
++        Log.d(TAG, "Generating serial number from SSAID: " + serial);
++        return serial;
++    }
++
++    // Report no shared libraries
++    // ApplicationPackageManager#getSharedLibrariesAsUser(int, int)
++    public static List<SharedLibraryInfo> getSharedLibrariesAsUser() {
++        // TODO: Report standard Pixel libraries to fix GCam installation?
++        return Collections.emptyList();
++    }
++
++    // Only get package info for current user
++    // ApplicationPackageManager#getPackageInfo(VersionedPackage, int)
++    // ApplicationPackageManager#getPackageInfoAsUser(String, int, int)
++    public static int getPackageInfoFlags(int flags) {
++        if (!GmsCompat.isEnabled()) {
++            return flags;
++        }
++
++        // Remove MATCH_ANY_USER flag to avoid permission denial
++        return flags & ~PackageManager.MATCH_ANY_USER;
++    }
++
++    // Fix RuntimeException: Using WebView from more than one process at once with the same data
++    // directory is not supported. https://crbug.com/558377
++    // Instrumentation#newApplication(ClassLoader, String, Context)
++    public static void initApplicationBeforeOnCreate(Application app) {
++        if (!GmsCompat.isEnabled() || app == null) {
++            return;
++        }
++
++        String processName = Application.getProcessName();
++        if (!app.getPackageName().equals(processName)) {
++            WebView.setDataDirectorySuffix("process-shim--" + processName);
++        }
++    }
+ }
+diff --git a/location/java/android/location/LocationManager.java b/location/java/android/location/LocationManager.java
+index b77a249d0fe9..0e940da0fb5c 100644
+--- a/location/java/android/location/LocationManager.java
++++ b/location/java/android/location/LocationManager.java
+@@ -37,6 +37,7 @@ import android.app.AlarmManager;
+ import android.app.AppOpsManager;
+ import android.app.PendingIntent;
+ import android.app.PropertyInvalidatedCache;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.Compatibility;
+ import android.compat.annotation.ChangeId;
+ import android.compat.annotation.EnabledAfter;
+@@ -413,6 +414,10 @@ public class LocationManager {
+     @SystemApi
+     @RequiresPermission(Manifest.permission.LOCATION_HARDWARE)
+     public void setExtraLocationControllerPackageEnabled(boolean enabled) {
++        if (GmsCompat.isEnabled()) {
++            return;
++        }
++
+         try {
+             mService.setExtraLocationControllerPackageEnabled(enabled);
+         } catch (RemoteException e) {
+diff --git a/services/core/java/com/android/server/am/ActivityManagerService.java b/services/core/java/com/android/server/am/ActivityManagerService.java
+index 0ae9cc279e68..c5b41491f090 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerService.java
++++ b/services/core/java/com/android/server/am/ActivityManagerService.java
+@@ -186,6 +186,7 @@ import android.app.ProfilerInfo;
+ import android.app.PropertyInvalidatedCache;
+ import android.app.WaitResult;
+ import android.app.backup.IBackupManager;
++import android.app.compat.gms.GmsCompat;
+ import android.app.usage.UsageEvents;
+ import android.app.usage.UsageEvents.Event;
+ import android.app.usage.UsageStatsManager;
+@@ -15099,6 +15100,10 @@ public class ActivityManagerService extends IActivityManager.Stub
+ 
+     boolean isSingleton(String componentProcessName, ApplicationInfo aInfo,
+             String className, int flags) {
++        if (GmsCompat.isGmsApp(aInfo)) {
++            return false;
++        }
++
+         boolean result = false;
+         // For apps that don't have pre-defined UIDs, check for permission
+         if (UserHandle.getAppId(aInfo.uid) >= FIRST_APPLICATION_UID) {
+diff --git a/telephony/java/android/telephony/TelephonyManager.java b/telephony/java/android/telephony/TelephonyManager.java
+index 10c3e6db5205..8bf2d41289b3 100644
+--- a/telephony/java/android/telephony/TelephonyManager.java
++++ b/telephony/java/android/telephony/TelephonyManager.java
+@@ -38,6 +38,7 @@ import android.annotation.SystemService;
+ import android.annotation.TestApi;
+ import android.annotation.WorkerThread;
+ import android.app.PendingIntent;
++import android.app.compat.gms.GmsCompat;
+ import android.app.role.RoleManager;
+ import android.compat.Compatibility;
+ import android.compat.annotation.ChangeId;
+@@ -1932,6 +1933,10 @@ public class TelephonyManager {
+     @SuppressAutoDoc // No support for device / profile owner or carrier privileges (b/72967236).
+     @RequiresPermission(android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE)
+     public String getDeviceId() {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         try {
+             ITelephony telephony = getITelephony();
+             if (telephony == null)
+@@ -1987,6 +1992,10 @@ public class TelephonyManager {
+     @SuppressAutoDoc // No support for device / profile owner or carrier privileges (b/72967236).
+     @RequiresPermission(android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE)
+     public String getDeviceId(int slotIndex) {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         // FIXME this assumes phoneId == slotIndex
+         try {
+             IPhoneSubInfo info = getSubscriberInfoService();
+@@ -2168,6 +2177,10 @@ public class TelephonyManager {
+     @SuppressAutoDoc // No support for device / profile owner or carrier privileges (b/72967236).
+     @RequiresPermission(android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE)
+     public String getMeid(int slotIndex) {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         ITelephony telephony = getITelephony();
+         if (telephony == null) return null;
+ 
+@@ -3025,6 +3038,10 @@ public class TelephonyManager {
+     @RequiresPermission(android.Manifest.permission.READ_PHONE_STATE)
+     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
+     public int getNetworkType(int subId) {
++        if (GmsCompat.isEnabled()) {
++            return NETWORK_TYPE_UNKNOWN;
++        }
++
+         try {
+             ITelephony telephony = getITelephony();
+             if (telephony != null) {
+@@ -3933,6 +3950,10 @@ public class TelephonyManager {
+     @RequiresPermission(android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE)
+     @UnsupportedAppUsage
+     public String getSimSerialNumber(int subId) {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         try {
+             IPhoneSubInfo info = getSubscriberInfoService();
+             if (info == null)
+@@ -4062,6 +4083,10 @@ public class TelephonyManager {
+     @SystemApi
+     @RequiresPermission(android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE)
+     public UiccSlotInfo[] getUiccSlotsInfo() {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         try {
+             ITelephony telephony = getITelephony();
+             if (telephony == null) {
+@@ -4226,6 +4251,10 @@ public class TelephonyManager {
+     @RequiresPermission(android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE)
+     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
+     public String getSubscriberId(int subId) {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         try {
+             IPhoneSubInfo info = getSubscriberInfoService();
+             if (info == null)
+diff --git a/wifi/java/android/net/wifi/WifiManager.java b/wifi/java/android/net/wifi/WifiManager.java
+index 21bdca5a9dd7..bb442613c587 100644
+--- a/wifi/java/android/net/wifi/WifiManager.java
++++ b/wifi/java/android/net/wifi/WifiManager.java
+@@ -32,6 +32,7 @@ import android.annotation.SuppressLint;
+ import android.annotation.SystemApi;
+ import android.annotation.SystemService;
+ import android.app.ActivityManager;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.Context;
+ import android.content.pm.ParceledListSlice;
+@@ -1432,6 +1433,10 @@ public class WifiManager {
+     @NonNull
+     public List<Pair<WifiConfiguration, Map<Integer, List<ScanResult>>>> getAllMatchingWifiConfigs(
+             @NonNull List<ScanResult> scanResults) {
++        if (GmsCompat.isEnabled()) {
++            return Collections.emptyList();
++        }
++
+         List<Pair<WifiConfiguration, Map<Integer, List<ScanResult>>>> configs = new ArrayList<>();
+         try {
+             Map<String, Map<Integer, List<ScanResult>>> results =
+@@ -1504,6 +1509,10 @@ public class WifiManager {
+     @NonNull
+     public Map<OsuProvider, List<ScanResult>> getMatchingOsuProviders(
+             @Nullable List<ScanResult> scanResults) {
++        if (GmsCompat.isEnabled()) {
++            return Collections.emptyMap();
++        }
++
+         if (scanResults == null) {
+             return new HashMap<>();
+         }
+@@ -1534,6 +1543,10 @@ public class WifiManager {
+     @NonNull
+     public Map<OsuProvider, PasspointConfiguration> getMatchingPasspointConfigsForOsuProviders(
+             @NonNull Set<OsuProvider> osuProviders) {
++        if (GmsCompat.isEnabled()) {
++            return Collections.emptyMap();
++        }
++
+         try {
+             return mService.getMatchingPasspointConfigsForOsuProviders(
+                     new ArrayList<>(osuProviders));
+@@ -4989,6 +5002,10 @@ public class WifiManager {
+             android.Manifest.permission.NETWORK_SETUP_WIZARD
+     })
+     public Network getCurrentNetwork() {
++        if (GmsCompat.isEnabled()) {
++            return null;
++        }
++
+         try {
+             return mService.getCurrentNetwork();
+         } catch (RemoteException e) {
+-- 
+2.33.0
+

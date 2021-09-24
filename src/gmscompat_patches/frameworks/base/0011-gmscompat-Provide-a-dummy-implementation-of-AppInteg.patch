@@ -1,0 +1,99 @@
+From a3d06daa711c8d90e54e8a96a43a616779310c69 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Sat, 10 Jul 2021 02:11:04 -0700
+Subject: [PATCH 11/34] gmscompat: Provide a dummy implementation of
+ AppIntegrityManager
+
+Newer versions of GMS crash if this service isn't available:
+
+FATAL EXCEPTION: [com.google.android.gms.chimera.GmsIntentOperationService$ChimeraService-Executor] idle
+Process: com.google.android.gms, PID: 23019
+java.lang.NullPointerException: Attempt to invoke virtual method 'java.lang.String android.content.integrity.AppIntegrityManager.getCurrentRuleSetProvider()' on a null object reference
+       at com.google.android.gms.appintegrity.service.AppIntegrityModuleInitIntentOperation.e(:com.google.android.gms@212415046@21.24.15 (150400-381273646):13)
+       at rpe.onHandleIntent(:com.google.android.gms@212415046@21.24.15 (150400-381273646):8)
+       at com.google.android.chimera.IntentOperation.onHandleIntent(:com.google.android.gms@212415046@21.24.15 (150400-381273646):2)
+       at roy.onHandleIntent(:com.google.android.gms@212415046@21.24.15 (150400-381273646):4)
+       at eck.run(:com.google.android.gms@212415046@21.24.15 (150400-381273646):5)
+       at ecj.run(:com.google.android.gms@212415046@21.24.15 (150400-381273646):11)
+       at bvgf.run(:com.google.android.gms@212415046@21.24.15 (150400-381273646):2)
+       at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1167)
+       at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:641)
+       at java.lang.Thread.run(Thread.java:923)
+
+Change-Id: Ic43702b78f7986d7739218fb6d0df2a26f7df270
+---
+ core/java/android/app/SystemServiceRegistry.java    |  5 +++++
+ .../content/integrity/AppIntegrityManager.java      | 13 +++++++++++++
+ 2 files changed, 18 insertions(+)
+
+diff --git a/core/java/android/app/SystemServiceRegistry.java b/core/java/android/app/SystemServiceRegistry.java
+index e599a5ce81ef..a9fb1130fa07 100644
+--- a/core/java/android/app/SystemServiceRegistry.java
++++ b/core/java/android/app/SystemServiceRegistry.java
+@@ -25,6 +25,7 @@ import android.app.ContextImpl.ServiceInitializationState;
+ import android.app.admin.DevicePolicyManager;
+ import android.app.admin.IDevicePolicyManager;
+ import android.app.blob.BlobStoreManagerFrameworkInitializer;
++import android.app.compat.gms.GmsCompat;
+ import android.app.contentsuggestions.ContentSuggestionsManager;
+ import android.app.contentsuggestions.IContentSuggestionsManager;
+ import android.app.job.JobSchedulerFrameworkInitializer;
+@@ -1323,6 +1324,10 @@ public final class SystemServiceRegistry {
+                     @Override
+                     public AppIntegrityManager createService(ContextImpl ctx)
+                             throws ServiceNotFoundException {
++                        if (GmsCompat.isEnabled()) {
++                            return new AppIntegrityManager(null);
++                        }
++
+                         IBinder b = ServiceManager.getServiceOrThrow(Context.APP_INTEGRITY_SERVICE);
+                         return new AppIntegrityManager(IAppIntegrityManager.Stub.asInterface(b));
+                     }});
+diff --git a/core/java/android/content/integrity/AppIntegrityManager.java b/core/java/android/content/integrity/AppIntegrityManager.java
+index 2869abb53b37..52e949c5d5ef 100644
+--- a/core/java/android/content/integrity/AppIntegrityManager.java
++++ b/core/java/android/content/integrity/AppIntegrityManager.java
+@@ -20,6 +20,7 @@ import android.annotation.NonNull;
+ import android.annotation.SystemApi;
+ import android.annotation.SystemService;
+ import android.annotation.TestApi;
++import android.app.compat.gms.GmsCompat;
+ import android.content.Context;
+ import android.content.IntentSender;
+ import android.content.pm.ParceledListSlice;
+@@ -75,6 +76,10 @@ public class AppIntegrityManager {
+      */
+     public void updateRuleSet(
+             @NonNull RuleSet updateRequest, @NonNull IntentSender statusReceiver) {
++        if (GmsCompat.isEnabled()) {
++            return;
++        }
++
+         try {
+             mManager.updateRuleSet(
+                     updateRequest.getVersion(),
+@@ -88,6 +93,10 @@ public class AppIntegrityManager {
+     /** Get the current version of the rule set. */
+     @NonNull
+     public String getCurrentRuleSetVersion() {
++        if (GmsCompat.isEnabled()) {
++            return "";
++        }
++
+         try {
+             return mManager.getCurrentRuleSetVersion();
+         } catch (RemoteException e) {
+@@ -98,6 +107,10 @@ public class AppIntegrityManager {
+     /** Get the name of the package that provided the current rule set. */
+     @NonNull
+     public String getCurrentRuleSetProvider() {
++        if (GmsCompat.isEnabled()) {
++            return "";
++        }
++
+         try {
+             return mManager.getCurrentRuleSetProvider();
+         } catch (RemoteException e) {
+-- 
+2.33.0
+

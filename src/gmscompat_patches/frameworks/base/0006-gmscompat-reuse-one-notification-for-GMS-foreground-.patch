@@ -1,0 +1,53 @@
+From 0ca6cae1f6cbc64dddff4fbfb65094eed93bf7e2 Mon Sep 17 00:00:00 2001
+From: Daniel Micay <danielmicay@gmail.com>
+Date: Fri, 16 Jul 2021 12:11:51 -0400
+Subject: [PATCH 06/34] gmscompat: reuse one notification for GMS foreground
+ services
+
+---
+ .../java/com/android/internal/gmscompat/GmsHooks.java | 11 +++--------
+ 1 file changed, 3 insertions(+), 8 deletions(-)
+
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index f228861f5a52..27a8e13ab171 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -38,6 +38,7 @@ public final class GmsHooks {
+ 
+     // Foreground service notifications
+     private static final String FGS_CHANNEL_ID = "service_shim";
++    private static final int FGS_NOTIFICATION_ID = 529977835;
+     private static boolean fgsChannelCreated = false;
+ 
+     // Static only
+@@ -77,12 +78,6 @@ public final class GmsHooks {
+             return;
+         }
+ 
+-        // Shorten name for display
+-        String serviceName = service.getClass().getName()
+-                .replace("com.google.android.gms.", "c.g.a.g.")
+-                .replace("com.google.android.", "c.g.a.")
+-                .replace("com.google.", "c.g.");
+-
+         // Channel
+         createFgsChannel(service);
+         // Notification
+@@ -90,12 +85,12 @@ public final class GmsHooks {
+                 PendingIntent.FLAG_IMMUTABLE);
+         Notification notification = new Notification.Builder(service, FGS_CHANNEL_ID)
+                 .setSmallIcon(service.getApplicationInfo().icon)
+-                .setContentTitle(serviceName)
++                .setContentTitle(service.getApplicationInfo().loadLabel(service.getPackageManager()))
+                 .setContentIntent(pi)
+                 .build();
+ 
+         Log.d(TAG, "Posting notification for service: " + service.getClass().getName());
+-        service.startForeground(serviceName.hashCode(), notification);
++        service.startForeground(FGS_NOTIFICATION_ID, notification);
+     }
+ 
+     // GMS tries to clean up its own notification channels periodically.
+-- 
+2.33.0
+

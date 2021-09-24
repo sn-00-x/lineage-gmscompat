@@ -1,0 +1,28 @@
+From cdd72481babf84ce979dc7d0c61f1cedae0efe50 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Mon, 2 Aug 2021 03:37:20 -0700
+Subject: [PATCH 23/34] gmscompat: dynamite: Remove redundant
+ File#isDirectory() call
+
+Change-Id: I44f7581b9e5701dbeb21f601f4147aab785aa6f2
+---
+ .../internal/gmscompat/dynamite/server/FileProxyService.java   | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyService.java b/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyService.java
+index d4b89fefbe1c..8656f0767d61 100644
+--- a/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyService.java
++++ b/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyService.java
+@@ -70,8 +70,7 @@ public final class FileProxyService extends IFileProxyService.Stub {
+             }
+ 
+             // World-readable or world-executable, depending on type
+-            boolean isDir = new File(nodePath).isDirectory();
+-            int permBit = isDir ? OsConstants.S_IXOTH : OsConstants.S_IROTH;
++            int permBit = OsConstants.S_ISDIR(mode) ? OsConstants.S_IXOTH : OsConstants.S_IROTH;
+             if ((mode & permBit) == 0) {
+                 throw new SecurityException("Node " + nodePath + " in path " + rawPath + " is not world-readable");
+             }
+-- 
+2.33.0
+

@@ -1,0 +1,29 @@
+From 4876e97a9f1595e2d5b11084ca5767739928ca84 Mon Sep 17 00:00:00 2001
+From: Daniel Micay <danielmicay@gmail.com>
+Date: Sun, 22 Aug 2021 22:12:14 -0400
+Subject: [PATCH 28/34] gmscompat: add hook for requestCellInfoUpdate
+
+---
+ telephony/java/android/telephony/TelephonyManager.java | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/telephony/java/android/telephony/TelephonyManager.java b/telephony/java/android/telephony/TelephonyManager.java
+index 97c9b2aa48ba..ce40260d15e5 100644
+--- a/telephony/java/android/telephony/TelephonyManager.java
++++ b/telephony/java/android/telephony/TelephonyManager.java
+@@ -6073,6 +6073,12 @@ public class TelephonyManager {
+             android.Manifest.permission.MODIFY_PHONE_STATE})
+     public void requestCellInfoUpdate(@NonNull WorkSource workSource,
+             @NonNull @CallbackExecutor Executor executor, @NonNull CellInfoCallback callback) {
++        if (GmsCompat.isEnabled()) {
++            // attribute power consumption to Play services instead of blaming the app using it
++            requestCellInfoUpdate(executor, callback);
++            return;
++        }
++
+         try {
+             ITelephony telephony = getITelephony();
+             if (telephony == null) return;
+-- 
+2.33.0
+

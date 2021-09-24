@@ -1,0 +1,820 @@
+From 27633a9a427c647202a5322987aca5e5c5a7aa3d Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Sat, 31 Jul 2021 17:25:56 -0700
+Subject: [PATCH 19/34] gmscompat: Add support for loading Dynamite modules
+
+This adds support for Google Play Services' dynamic module system,
+Dynamite, which provides shared library modules (automatically
+downloaded and updated from Google) to any client app that uses the Play
+Services SDK. Many of Google's first-party apps are using Dynamite
+modules (Cronet, Measurement, Google certificates, etc.), and an
+increasing number of third-party apps are using the Cronet Dynamite
+module.
+
+The Google Play Services client normally attempts to open module APKs
+directly from /data/user_de/0/com.google.android.gms/app_chimera/m,
+which is available because it bypasses app data isolation.
+Unfortunately, this is still not possible to allow without weakening the
+SELinux sandbox [1].
+
+This commit modifies the module loading process to delegate file opening
+to a GMS service and pass open ParcelFileDescriptors through IPC. On the
+client side, everything is modified to load code and assets directly
+from copies of the fd (via mmap).
+
+Newly working first-party apps: Google Maps, Google Assistant
+
+Other apps should also work better now that full-blown Cronet can be
+used instead of the Java-based fallback.
+
+New module loading process: (* = compat)
+  - Client app starts
+      * Install libcore hooks
+  - Client app calls Play Services SDK
+  - SDK loads DynamiteLoaderImpl (IDynamiteLoader) from GMS APK
+  - GMS code (in client process) takes over
+  - GMS client creates DelegateLastClassLoader with dex and native paths
+      * Client creates DynamiteContext
+      * Request file proxy service from GMS process (via broadcast)
+      * GMS creates FileProxyService and replies via broadcast
+      * Client calls openFile
+      * GMS validates & sanitizes path and returns open ParcelFileDescriptor
+      * Client creates thread-local ModuleLoadState
+  - DelegateLastClassLoader init continues and creates DexPathList
+      * Get current module fd from thread-local ModuleLoadState
+      * Open fd as zip and parse entries
+      * mmap classes##.dex files
+      * Pass MappedByteBuffers to DexPathList (quasi-InMemoryDexClassLoader)
+  - GMS client creates module Context with assets and resources
+      * ResourcesManager calls ApkAssets.loadFromPath
+      * Get current module fd from thread-local ModuleLoadState
+      * Redirect call to ApkAssets.loadFromFd
+  - GMS client checks FileApk modification date
+      * Client calls File(path)#lastModified()
+      * Get current module path from thread-local ModuleLoadState
+      * Call FileProxyService to get modification date
+      * GMS returns modification date of sanitized path
+      * Client clears thread-local ModuleLoadState; compat end
+  - GMS client returns module Context
+
+Dependency commits:
+  - bionic
+    - linker: Add support for opening zip files by fd paths [2]
+  - libcore
+    - ZipFile: Add support for opening zip files by fd paths [3]
+    - libcore: Add hooks for Dynamite module support in GmsCompat [4]
+
+Expected module loading output:
+
+    D GmsCompat/DynamiteClient: Loading module: /data/user_de/0/com.google.android.gms/app_chimera/m/00000011/CronetDynamite.apk!/lib/arm64-v8a
+    D GmsCompat/DynamiteClient: Requesting file proxy service from GMS
+    D GmsCompat/DynamiteServer: Sending file proxy binder to dev.kdrag0n.dynamitetest
+    D GmsCompat/DynamiteServer: Opening /data/user_de/0/com.google.android.gms/app_chimera/m/00000011/CronetDynamite.apk for remote
+    D GmsCompat/DynamiteClient: Received remote fd: /data/user_de/0/com.google.android.gms/app_chimera/m/00000011/CronetDynamite.apk -> 71
+    D GmsCompat/DynamiteClient: Creating class loader with 1 dex buffer(s)
+    D GmsCompat/DynamiteClient: Replacing /data/user_de/0/com.google.android.gms/app_chimera/m/00000011/CronetDynamite.apk -> fd 71
+    D GmsCompat/DynamiteClient: File /data/user_de/0/com.google.android.gms/app_chimera/m/00000011/CronetDynamite.apk lastModified=1627004593000
+    D GmsCompat/DynamiteClient: Finished loading module /data/user_de/0/com.google.android.gms/app_chimera/m/00000011/CronetDynamite.apk
+
+[1] https://android.googlesource.com/platform/system/sepolicy/+/refs/tags/android-s-beta-3/private/mls#72
+[2] https://github.com/GrapheneOS/platform_bionic/pull/10
+[3] https://github.com/GrapheneOS/platform_libcore/pull/1
+[4] https://github.com/GrapheneOS/platform_libcore/pull/2
+
+Change-Id: I387d41308dd970ea3fcdbe32b742acbc325efd27
+---
+ core/java/android/content/res/ApkAssets.java  |   9 +
+ .../android/internal/gmscompat/GmsHooks.java  |  15 +-
+ .../gmscompat/dynamite/GmsDynamiteHooks.java  | 200 ++++++++++++++++++
+ .../dynamite/client/DynamiteContext.java      | 153 ++++++++++++++
+ .../dynamite/client/ModuleLoadState.java      |  64 ++++++
+ .../dynamite/server/FileProxyProvider.java    |  86 ++++++++
+ .../dynamite/server/FileProxyService.java     | 101 +++++++++
+ .../dynamite/server/IFileProxyService.aidl    |   7 +
+ 8 files changed, 631 insertions(+), 4 deletions(-)
+ create mode 100644 core/java/com/android/internal/gmscompat/dynamite/GmsDynamiteHooks.java
+ create mode 100644 core/java/com/android/internal/gmscompat/dynamite/client/DynamiteContext.java
+ create mode 100644 core/java/com/android/internal/gmscompat/dynamite/client/ModuleLoadState.java
+ create mode 100644 core/java/com/android/internal/gmscompat/dynamite/server/FileProxyProvider.java
+ create mode 100644 core/java/com/android/internal/gmscompat/dynamite/server/FileProxyService.java
+ create mode 100644 core/java/com/android/internal/gmscompat/dynamite/server/IFileProxyService.aidl
+
+diff --git a/core/java/android/content/res/ApkAssets.java b/core/java/android/content/res/ApkAssets.java
+index bc418061e1d1..6b9f8fab5426 100644
+--- a/core/java/android/content/res/ApkAssets.java
++++ b/core/java/android/content/res/ApkAssets.java
+@@ -18,12 +18,14 @@ package android.content.res;
+ import android.annotation.IntDef;
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.om.OverlayableInfo;
+ import android.content.res.loader.AssetsProvider;
+ import android.content.res.loader.ResourcesProvider;
+ 
+ import com.android.internal.annotations.GuardedBy;
++import com.android.internal.gmscompat.dynamite.GmsDynamiteHooks;
+ 
+ import java.io.FileDescriptor;
+ import java.io.IOException;
+@@ -137,6 +139,13 @@ public final class ApkAssets {
+      */
+     public static @NonNull ApkAssets loadFromPath(@NonNull String path, @PropertyFlags int flags)
+             throws IOException {
++        if (GmsCompat.isDynamiteClient()) {
++            ApkAssets assets = GmsDynamiteHooks.loadAssetsFromPath(path, flags);
++            if (assets != null) {
++                return assets;
++            }
++        }
++
+         return new ApkAssets(FORMAT_APK, path, flags, null /* assets */);
+     }
+ 
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index 52c7a7b8f209..52a7145eed02 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -41,6 +41,7 @@ import android.util.Log;
+ import android.webkit.WebView;
+ 
+ import com.android.internal.R;
++import com.android.internal.gmscompat.dynamite.GmsDynamiteHooks;
+ 
+ import java.util.Collections;
+ import java.util.List;
+@@ -197,13 +198,19 @@ public final class GmsHooks {
+     // directory is not supported. https://crbug.com/558377
+     // Instrumentation#newApplication(ClassLoader, String, Context)
+     public static void initApplicationBeforeOnCreate(Application app) {
+-        if (!GmsCompat.isEnabled() || app == null) {
++        if (app == null) {
+             return;
+         }
+ 
+-        String processName = Application.getProcessName();
+-        if (!app.getPackageName().equals(processName)) {
+-            WebView.setDataDirectorySuffix("process-shim--" + processName);
++        if (GmsCompat.isEnabled()) {
++            String processName = Application.getProcessName();
++            if (!app.getPackageName().equals(processName)) {
++                WebView.setDataDirectorySuffix("process-shim--" + processName);
++            }
++
++            GmsDynamiteHooks.initGmsServerApp(app);
++        } else if (GmsCompat.isDynamiteClient()) {
++            GmsDynamiteHooks.initClientApp();
+         }
+     }
+ 
+diff --git a/core/java/com/android/internal/gmscompat/dynamite/GmsDynamiteHooks.java b/core/java/com/android/internal/gmscompat/dynamite/GmsDynamiteHooks.java
+new file mode 100644
+index 000000000000..dfd1a1c6e73b
+--- /dev/null
++++ b/core/java/com/android/internal/gmscompat/dynamite/GmsDynamiteHooks.java
+@@ -0,0 +1,200 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.internal.gmscompat.dynamite;
++
++import android.app.ActivityThread;
++import android.app.Application;
++import android.content.Context;
++import android.content.res.ApkAssets;
++import android.os.ParcelFileDescriptor;
++import android.os.Process;
++import android.os.RemoteException;
++import android.util.Log;
++
++import com.android.internal.gmscompat.GmsInfo;
++import com.android.internal.gmscompat.dynamite.client.ModuleLoadState;
++import com.android.internal.gmscompat.dynamite.client.DynamiteContext;
++import com.android.internal.gmscompat.dynamite.server.FileProxyProvider;
++
++import dalvik.system.DelegateLastClassLoader;
++import dalvik.system.DexPathList;
++
++import java.io.File;
++import java.io.FileNotFoundException;
++import java.io.IOException;
++import java.nio.ByteBuffer;
++import java.util.Arrays;
++import java.util.List;
++import java.util.Objects;
++import java.util.regex.Pattern;
++import java.util.stream.Collectors;
++
++/**
++ * Hooks specific to Dynamite module compatibility.
++ *
++ * @hide
++ */
++public final class GmsDynamiteHooks {
++    // Some hooks can be considered hot paths, so cache the enabled state.
++    private static volatile boolean isClient = false;
++    // Created lazily because most apps don't use Dynamite modules
++    private static DynamiteContext clientContext = null;
++
++    private GmsDynamiteHooks() { }
++
++    private static DynamiteContext getClientContext() {
++        if (clientContext != null) {
++            return clientContext;
++        }
++
++        Context context = Objects.requireNonNull(ActivityThread.currentApplication());
++        clientContext = new DynamiteContext(context);
++        return clientContext;
++    }
++
++    public static void initClientApp() {
++        isClient = true;
++
++        // Install hooks (requires libcore changes)
++        DexPathList.postConstructorBufferHook = GmsDynamiteHooks::getDexPathListBuffers;
++        File.lastModifiedHook = GmsDynamiteHooks::getFileLastModified;
++        DelegateLastClassLoader.librarySearchPathHook = GmsDynamiteHooks::mapRemoteLibraryPaths;
++    }
++
++    public static void initGmsServerApp(Application app) {
++        // Main GMS process only, to avoid serving proxy requests multiple times.
++        // This is specifically the main process, not persistent, because
++        // com.google.android.gms.chimera.container.FileApkIntentOperation$ExternalFileApkService
++        // is in the main process and thus the process is guaranteed to start before
++        // DelegateLastClassLoader requests the file proxy service.
++        if (!Process.isIsolated() && Application.getProcessName().equals(GmsInfo.PACKAGE_GMS)) {
++            FileProxyProvider.register(app);
++        }
++    }
++
++    // For Android assets and resources
++    // ApkAssets#loadFromPath(String, int)
++    public static ApkAssets loadAssetsFromPath(String path, int flags) throws IOException {
++        if (!isClient) {
++            return null;
++        }
++
++        ModuleLoadState state = getClientContext().getState();
++        if (state == null || !state.modulePath.equals(path)) {
++            return null;
++        }
++
++        Log.d(DynamiteContext.TAG, "Replacing " + path + " -> fd " + state.moduleFd.getInt$());
++        return ApkAssets.loadFromFd(state.moduleFd, path, flags, null);
++    }
++
++    // For Java code
++    // DexPathList(ClassLoader, String, String, File, boolean)
++    private static ByteBuffer[] getDexPathListBuffers(DexPathList pathList) {
++        if (!isClient) {
++            return null;
++        }
++
++        ModuleLoadState state = getClientContext().getState();
++        if (state == null) {
++            return null;
++        }
++
++        ByteBuffer[] buffers;
++        try {
++            buffers = state.mapDexBuffers();
++        } catch (IOException e) {
++            throw new RuntimeException(e);
++        }
++
++        Log.d(DynamiteContext.TAG, "Creating class loader with " + buffers.length + " dex buffer(s)");
++
++        // Undo path init and re-initialize with the ByteBuffers
++        return buffers;
++    }
++
++    // To fix false-positive "Module APK has been modified" check
++    // File#lastModified()
++    private static Long getFileLastModified(File file) {
++        if (!isClient) {
++            return null;
++        }
++
++        ModuleLoadState state = getClientContext().getState();
++        if (state == null || !state.modulePath.equals(file.getPath())) {
++            return null;
++        }
++
++        long lastModified;
++        try {
++            lastModified = getClientContext().getService().getLastModified(file.getPath());
++        } catch (RemoteException e) {
++            throw e.rethrowAsRuntimeException();
++        }
++        Log.d(DynamiteContext.TAG, "File " + file.getPath() + " lastModified=" + lastModified);
++
++        // This is the final hook in the module loading process, so clear the state.
++        getClientContext().setState(null);
++
++        Log.d(DynamiteContext.TAG, "Finished loading module " + state.modulePath);
++        return lastModified;
++    }
++
++    // To start the module loading process and map native library paths to fd from remote
++    public static String mapRemoteLibraryPaths(String librarySearchPath) {
++        if (!isClient || librarySearchPath == null) {
++            return librarySearchPath;
++        }
++
++        String[] searchPaths = librarySearchPath.split(Pattern.quote(File.pathSeparator));
++
++        List<String> newPaths = Arrays.stream(searchPaths).map(libPath -> {
++            if (!libPath.startsWith(getClientContext().gmsDataPrefix)) {
++                return libPath;
++            }
++
++            Log.d(DynamiteContext.TAG, "Loading module: " + libPath);
++            String[] libComponents = libPath.split("!");
++            String path = libComponents[0];
++
++            // Ask GMS to open the file and return a PFD. Be careful with ownership.
++            ParcelFileDescriptor srcPfd;
++            try {
++                srcPfd = getClientContext().getService().openFile(path);
++            } catch (RemoteException e) {
++                throw e.rethrowAsRuntimeException();
++            }
++            if (srcPfd == null) {
++                throw new RuntimeException(new FileNotFoundException(path));
++            }
++
++            // For ApkAssets, DexPathList, File#lastModified()
++            Log.d(DynamiteContext.TAG, "Received remote fd: " + path + " -> " + srcPfd.getFd());
++            ModuleLoadState state = new ModuleLoadState(path, srcPfd.getFileDescriptor());
++            getClientContext().setState(state);
++
++            // Native code dups the fd each time it loads a lib
++            String fdPath = "/proc/self/fd/" + srcPfd.getFd();
++            libComponents[0] = fdPath;
++
++            // Re-combine the path with native library components
++            return String.join("!", libComponents);
++        }).collect(Collectors.toList());
++
++        return String.join(File.pathSeparator, newPaths);
++    }
++}
+diff --git a/core/java/com/android/internal/gmscompat/dynamite/client/DynamiteContext.java b/core/java/com/android/internal/gmscompat/dynamite/client/DynamiteContext.java
+new file mode 100644
+index 000000000000..10d99679bd25
+--- /dev/null
++++ b/core/java/com/android/internal/gmscompat/dynamite/client/DynamiteContext.java
+@@ -0,0 +1,153 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.internal.gmscompat.dynamite.client;
++
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++import android.content.IntentFilter;
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.HandlerThread;
++import android.os.IBinder;
++import android.os.RemoteException;
++import android.util.Log;
++
++import com.android.internal.gmscompat.GmsInfo;
++import com.android.internal.gmscompat.dynamite.server.FileProxyProvider;
++import com.android.internal.gmscompat.dynamite.server.IFileProxyService;
++
++/** @hide */
++public final class DynamiteContext {
++    public static final String TAG = "GmsCompat/DynamiteClient";
++
++    // Permission that only GMS holds
++    private static final String GMS_PERM = "com.google.android.gms.permission.INTERNAL_BROADCAST";
++
++    // Make sure we don't block the main thread for too long if GMS isn't available
++    private static final long GET_SERVICE_TIMEOUT = 250L;
++
++    private final Context context;
++    public final String gmsDataPrefix;
++
++    // Manage state for loading one module at a time per thread
++    private final ThreadLocal<ModuleLoadState> threadLocalState = new ThreadLocal<>();
++
++    // The remote GMS process can die at any time, so this needs to be managed carefully.
++    private IFileProxyService serviceBinder = null;
++
++    public DynamiteContext(Context context) {
++        this.context = context;
++
++        // Use our own context and replace the package name to avoid ApkAssets recursion when
++        // lazy-creating a DynamiteContext in the ApkAssets hook
++        this.gmsDataPrefix = context.createDeviceProtectedStorageContext().getDataDir().getPath()
++                .replace(context.getPackageName(), GmsInfo.PACKAGE_GMS) + "/";
++    }
++
++    public ModuleLoadState getState() {
++        return threadLocalState.get();
++    }
++    public void setState(ModuleLoadState state) {
++        threadLocalState.set(state);
++    }
++
++    public IFileProxyService getService() {
++        return serviceBinder == null ? getNewBinder() : serviceBinder;
++    }
++
++    private IFileProxyService getNewBinder() {
++        // Request a fresh service unconditionally
++        IFileProxyService binder = requestGmsService();
++
++        // Register before saving to avoid race condition if GMS dies *now*
++        try {
++            binder.asBinder().linkToDeath(() -> {
++                Log.d(DynamiteContext.TAG, "File proxy service has died");
++                serviceBinder = null;
++            }, 0);
++
++            serviceBinder = binder;
++            return binder;
++        } catch (RemoteException e) {
++            serviceBinder = null;
++            return null;
++        }
++    }
++
++    private IFileProxyService requestGmsService() {
++        // Create a dedicated thread to avoid deadlocks, since this might be called on the main thread
++        HandlerThread thread = new HandlerThread(FileProxyProvider.THREAD_NAME);
++        thread.start();
++        Handler handler = new Handler(thread.getLooper());
++
++        // Potential return values
++        final IFileProxyService[] service = {null};
++        final RuntimeException[] receiverException = {null};
++        BroadcastReceiver replyReceiver = new BroadcastReceiver() {
++            @Override
++            public void onReceive(Context context, Intent intent) {
++                if (!intent.getAction().equals(FileProxyProvider.ACTION_RESPONSE)) {
++                    return;
++                }
++
++                try {
++                    Bundle bundle = intent.getBundleExtra(FileProxyProvider.EXTRA_BUNDLE);
++                    IBinder binder = bundle.getBinder(FileProxyProvider.EXTRA_BINDER);
++                    service[0] = IFileProxyService.Stub.asInterface(binder);
++                } catch (RuntimeException e) {
++                    receiverException[0] = e;
++                } finally {
++                    thread.quitSafely();
++                }
++            }
++        };
++
++        // Register receiver first
++        IntentFilter filter = new IntentFilter(FileProxyProvider.ACTION_RESPONSE);
++        // For security, we require the reply to come from GMS (by permission) so other apps
++        // can't inject code into our process by replying with a fake proxy service that returns
++        // malicious APKs.
++        context.registerReceiver(replyReceiver, filter, GMS_PERM, handler);
++
++        // Now, send the broadcast and wait...
++        try {
++            Log.d(TAG, "Requesting file proxy service from GMS");
++
++            Intent intent = new Intent(FileProxyProvider.ACTION_REQUEST);
++            intent.setPackage(GmsInfo.PACKAGE_GMS);
++            intent.putExtra(FileProxyProvider.EXTRA_PACKAGE, context.getPackageName());
++            context.sendBroadcast(intent, GMS_PERM);
++            thread.join(GET_SERVICE_TIMEOUT);
++        } catch (InterruptedException e) {
++            throw new RuntimeException(e);
++        } finally {
++            context.unregisterReceiver(replyReceiver);
++            // Attempt to stop the thread if join() timed out
++            thread.quit();
++        }
++
++        // Rethrow exception or return value
++        if (receiverException[0] != null) {
++            throw receiverException[0];
++        } else if (service[0] != null) {
++            return service[0];
++        } else {
++            throw new IllegalStateException("Dynamite file proxy request timed out");
++        }
++    }
++}
+diff --git a/core/java/com/android/internal/gmscompat/dynamite/client/ModuleLoadState.java b/core/java/com/android/internal/gmscompat/dynamite/client/ModuleLoadState.java
+new file mode 100644
+index 000000000000..29b39679b75d
+--- /dev/null
++++ b/core/java/com/android/internal/gmscompat/dynamite/client/ModuleLoadState.java
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.internal.gmscompat.dynamite.client;
++
++import android.util.jar.StrictJarFile;
++
++import java.io.FileDescriptor;
++import java.io.FileInputStream;
++import java.io.IOException;
++import java.nio.ByteBuffer;
++import java.nio.channels.FileChannel;
++import java.util.ArrayList;
++import java.util.regex.Pattern;
++import java.util.zip.ZipEntry;
++
++/** @hide */
++public final class ModuleLoadState {
++    private static final Pattern CLASSES_DEX_PATTERN = Pattern.compile("^classes\\d*\\.dex$");
++
++    public String modulePath;
++    public FileDescriptor moduleFd;
++
++    public ModuleLoadState(String modulePath, FileDescriptor moduleFd) {
++        this.modulePath = modulePath;
++        // Do NOT close the original fd. The Bionic linker could dup it for library loading
++        // at any time. Unfortunately, this results in CloseGuard warnings, but it's more efficient
++        // to just ignore them.
++        this.moduleFd = moduleFd;
++    }
++
++    public ByteBuffer[] mapDexBuffers() throws IOException {
++        // Native code doesn't assume ownership, so we can safely use the original fd temporarily
++        FileChannel channel = new FileInputStream(moduleFd).getChannel();
++        // Dynamite modules don't seem to have proper v2 signatures, so don't verify them
++        StrictJarFile jar = new StrictJarFile(moduleFd, false, false);
++
++        ArrayList<ByteBuffer> buffers = new ArrayList<>(1);
++        jar.iterator().forEachRemaining(entry -> {
++            if (entry.getMethod() == ZipEntry.STORED && CLASSES_DEX_PATTERN.matcher(entry.getName()).matches()) {
++                try {
++                    buffers.add(channel.map(FileChannel.MapMode.READ_ONLY, entry.getDataOffset(), entry.getSize()));
++                } catch (IOException e) {
++                    throw new RuntimeException(e);
++                }
++            }
++        });
++
++        return buffers.toArray(new ByteBuffer[0]);
++    }
++}
+diff --git a/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyProvider.java b/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyProvider.java
+new file mode 100644
+index 000000000000..c39bf23bc734
+--- /dev/null
++++ b/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyProvider.java
+@@ -0,0 +1,86 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.internal.gmscompat.dynamite.server;
++
++import android.app.Application;
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++import android.content.IntentFilter;
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.HandlerThread;
++import android.util.Log;
++
++/** @hide */
++public final class FileProxyProvider extends BroadcastReceiver {
++    public static final String EXTRA_BUNDLE = "service_bundle";
++    public static final String EXTRA_BINDER = "service_binder";
++    public static final String EXTRA_PACKAGE = "service_client_package";
++
++    public static final String ACTION_REQUEST = "com.android.internal.gmscompat.REQUEST_DYNAMITE_FILE_PROXY";
++    public static final String ACTION_RESPONSE = "com.android.internal.gmscompat.DYNAMITE_FILE_PROXY";
++
++    public static final String THREAD_NAME = "DynamiteFileProxy";
++
++    private FileProxyService service;
++
++    private FileProxyProvider() { }
++
++    @Override
++    public void onReceive(Context context, Intent intent) {
++        if (!intent.getAction().equals(ACTION_REQUEST)) {
++            return;
++        }
++
++        if (service == null) {
++            service = new FileProxyService(context);
++        }
++
++        Intent reply = new Intent(ACTION_RESPONSE);
++
++        // Use an explicit intent to avoid sending multiple replies to clients that
++        // request the file proxy binder at the same time. Security doesn't matter because
++        // this is a public service, and we can't use PendingIntents due to permission checks
++        // on the client side.
++        String clientPackage = intent.getStringExtra(EXTRA_PACKAGE);
++        if (clientPackage == null) {
++            return;
++        }
++        reply.setPackage(clientPackage);
++
++        // New bundle is required because Intent doesn't expose IBinder extras
++        Bundle bundle = new Bundle();
++        bundle.putBinder(EXTRA_BINDER, service.asBinder());
++        reply.putExtra(EXTRA_BUNDLE, bundle);
++
++        Log.d(FileProxyService.TAG, "Sending file proxy binder to " + clientPackage);
++        context.sendBroadcast(reply);
++    }
++
++    public static void register(Context context) {
++        Log.d(FileProxyService.TAG, "Registering file proxy provider from " + Application.getProcessName());
++
++        // Create a dedicated thread to avoid blocking clients for too long
++        HandlerThread thread = new HandlerThread(THREAD_NAME);
++        thread.start();
++        Handler handler = new Handler(thread.getLooper());
++
++        IntentFilter filter = new IntentFilter(ACTION_REQUEST);
++        context.registerReceiver(new FileProxyProvider(), filter, null, handler);
++    }
++}
+diff --git a/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyService.java b/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyService.java
+new file mode 100644
+index 000000000000..d4b89fefbe1c
+--- /dev/null
++++ b/core/java/com/android/internal/gmscompat/dynamite/server/FileProxyService.java
+@@ -0,0 +1,101 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.internal.gmscompat.dynamite.server;
++
++import android.content.Context;
++import android.os.ParcelFileDescriptor;
++import android.system.ErrnoException;
++import android.system.Os;
++import android.system.OsConstants;
++import android.util.Log;
++
++import java.io.File;
++import java.io.FileNotFoundException;
++import java.io.IOException;
++import java.util.Arrays;
++import java.util.List;
++
++/** @hide */
++public final class FileProxyService extends IFileProxyService.Stub {
++    public static final String TAG = "GmsCompat/DynamiteServer";
++    private static final String CHIMERA_REL_PATH = "app_chimera/m/";
++
++    private final File deDataRoot;
++    private final String chimeraRoot;
++
++    public FileProxyService(Context context) {
++        deDataRoot = context.createDeviceProtectedStorageContext().getDataDir();
++        chimeraRoot = deDataRoot.getPath() + "/" + CHIMERA_REL_PATH;
++    }
++
++    private String sanitizeModulePath(String rawPath) {
++        // Normalize path for security checks
++        String path;
++        try {
++            path = new File(rawPath).getCanonicalPath();
++        } catch (IOException e) {
++            throw new SecurityException("Invalid path " + rawPath + ": " + e.getMessage());
++        }
++
++        // Modules can only be in DE Chimera storage
++        if (!path.startsWith(chimeraRoot)) {
++            throw new SecurityException("Path " + rawPath + " is not in " + chimeraRoot);
++        }
++
++        // Check permissions recursively
++        String relPath = path.substring(deDataRoot.getPath().length() + 1); // already checked prefix above
++        List<String> relParts = Arrays.asList(relPath.split("/"));
++        for (int i = 0; i < relParts.size(); i++) {
++            List<String> leadingParts = relParts.subList(0, i + 1);
++            String nodePath = deDataRoot + "/" + String.join("/", leadingParts);
++            int mode;
++            try {
++                mode = Os.stat(nodePath).st_mode;
++            } catch (ErrnoException e) {
++                throw new SecurityException("Failed to stat " + rawPath + ": " + e.getMessage());
++            }
++
++            // World-readable or world-executable, depending on type
++            boolean isDir = new File(nodePath).isDirectory();
++            int permBit = isDir ? OsConstants.S_IXOTH : OsConstants.S_IROTH;
++            if ((mode & permBit) == 0) {
++                throw new SecurityException("Node " + nodePath + " in path " + rawPath + " is not world-readable");
++            }
++        }
++
++        return path;
++    }
++
++    private ParcelFileDescriptor getFilePfd(String path) {
++        Log.d(TAG, "Opening " + path + " for remote");
++        try {
++            return ParcelFileDescriptor.open(new File(path), ParcelFileDescriptor.MODE_READ_ONLY);
++        } catch (FileNotFoundException e) {
++            return null;
++        }
++    }
++
++    @Override
++    public ParcelFileDescriptor openFile(String rawPath) {
++        return getFilePfd(sanitizeModulePath(rawPath));
++    }
++
++    @Override
++    public long getLastModified(String rawPath) {
++        return new File(sanitizeModulePath(rawPath)).lastModified();
++    }
++}
+diff --git a/core/java/com/android/internal/gmscompat/dynamite/server/IFileProxyService.aidl b/core/java/com/android/internal/gmscompat/dynamite/server/IFileProxyService.aidl
+new file mode 100644
+index 000000000000..15e5c4195715
+--- /dev/null
++++ b/core/java/com/android/internal/gmscompat/dynamite/server/IFileProxyService.aidl
+@@ -0,0 +1,7 @@
++package com.android.internal.gmscompat.dynamite.server;
++
++/** @hide */
++interface IFileProxyService {
++    ParcelFileDescriptor openFile(String path);
++    long getLastModified(String path);
++}
+-- 
+2.33.0
+

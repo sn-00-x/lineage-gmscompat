@@ -1,0 +1,25 @@
+From 59ea45a07f3501fc06136b8f591307ecb081d064 Mon Sep 17 00:00:00 2001
+From: Daniel Micay <danielmicay@gmail.com>
+Date: Wed, 22 Sep 2021 04:59:06 -0400
+Subject: [PATCH 34/34] gmscompat: update comment (Google Camera works fine)
+
+---
+ core/java/com/android/internal/gmscompat/GmsHooks.java | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index d21346d59aee..620bb7e46fa0 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -178,7 +178,7 @@ public final class GmsHooks {
+     // Report no shared libraries
+     // ApplicationPackageManager#getSharedLibrariesAsUser(int, int)
+     public static List<SharedLibraryInfo> getSharedLibrariesAsUser() {
+-        // TODO: Report standard Pixel libraries to fix GCam installation?
++        // TODO: Report standard Pixel libraries?
+         return Collections.emptyList();
+     }
+ 
+-- 
+2.33.0
+

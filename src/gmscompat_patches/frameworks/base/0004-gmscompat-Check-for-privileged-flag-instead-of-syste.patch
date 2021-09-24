@@ -1,0 +1,55 @@
+From 58d58eec2dfe35852edd0c60bca6dbf314e265eb Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Mon, 12 Jul 2021 16:52:21 -0700
+Subject: [PATCH 04/34] gmscompat: Check for privileged flag instead of system
+
+GMS apps are in /product, not /system. The privileged flag is what we
+really want to check here.
+
+Change-Id: I333c4df6ce3d02a8fa79334bd6c052d724e1a2d2
+---
+ core/java/android/app/compat/gms/GmsCompat.java | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/core/java/android/app/compat/gms/GmsCompat.java b/core/java/android/app/compat/gms/GmsCompat.java
+index 617c2dd06677..611461e3a839 100644
+--- a/core/java/android/app/compat/gms/GmsCompat.java
++++ b/core/java/android/app/compat/gms/GmsCompat.java
+@@ -101,7 +101,12 @@ public final class GmsCompat {
+      *
+      * @hide
+      */
+-    public static boolean isGmsApp(String packageName, Signature[] signatures) {
++    public static boolean isGmsApp(String packageName, Signature[] signatures, boolean isPrivileged) {
++        // Privileged GMS doesn't need any compatibility changes
++        if (isPrivileged) {
++            return false;
++        }
++
+         if (!GmsInfo.PACKAGE_GMS.equals(packageName) &&
+                 !GmsInfo.PACKAGE_GSF.equals(packageName) &&
+                 !GmsInfo.PACKAGE_PLAY_STORE.equals(packageName)) {
+@@ -123,11 +128,6 @@ public final class GmsCompat {
+ 
+     /** @hide */
+     public static boolean isGmsApp(ApplicationInfo app) {
+-        // Privileged GMS doesn't need any compatibility changes
+-        if (app.isSystemApp()) {
+-            return false;
+-        }
+-
+         int userId = UserHandle.getUserId(app.uid);
+         IPackageManager pm = ActivityThread.getPackageManager();
+ 
+@@ -144,7 +144,7 @@ public final class GmsCompat {
+         Signature[] signatures = pkg.signingInfo.hasMultipleSigners() ?
+                 pkg.signingInfo.getApkContentsSigners() :
+                 pkg.signingInfo.getSigningCertificateHistory();
+-        return isGmsApp(app.packageName, signatures);
++        return isGmsApp(app.packageName, signatures, app.isPrivilegedApp());
+     }
+ 
+     /** @hide */
+-- 
+2.33.0
+

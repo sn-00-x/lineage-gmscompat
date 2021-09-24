@@ -1,0 +1,199 @@
+From 87711a21c87e4b67bb2a202a98211a89528f8bb8 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Thu, 8 Jul 2021 03:09:36 -0700
+Subject: [PATCH 05/34] gmscompat: Keep GMS services alive by converting to
+ foreground services
+
+Unprivileged apps can't be exempt from the background execution
+requirements, so keep GMS services alive by converting them to
+foreground services.
+
+Apps must post a foreground service notification for each service within
+10 seconds of the service starting or the system will kill the entire
+process, so generate notifications dynamically from fully-qualified
+service class names and post them automatically for GMS apps.
+
+Change-Id: I0c8a44bf86c364dbbd22ef18138a9a57c86a7bdc
+---
+ core/java/android/app/ActivityThread.java     |  2 +
+ core/java/android/app/ContextImpl.java        |  6 ++
+ .../android/internal/gmscompat/GmsHooks.java  | 77 +++++++++++++++++++
+ core/res/res/values/strings.xml               |  3 +
+ core/res/res/values/symbols.xml               |  1 +
+ 5 files changed, 89 insertions(+)
+
+diff --git a/core/java/android/app/ActivityThread.java b/core/java/android/app/ActivityThread.java
+index 4cc486a0b9b4..b07ef232baa4 100644
+--- a/core/java/android/app/ActivityThread.java
++++ b/core/java/android/app/ActivityThread.java
+@@ -173,6 +173,7 @@ import com.android.internal.annotations.GuardedBy;
+ import com.android.internal.annotations.VisibleForTesting;
+ import com.android.internal.app.IVoiceInteractor;
+ import com.android.internal.content.ReferrerIntent;
++import com.android.internal.gmscompat.GmsHooks;
+ import com.android.internal.os.BinderInternal;
+ import com.android.internal.os.RuntimeInit;
+ import com.android.internal.os.SomeArgs;
+@@ -4183,6 +4184,7 @@ public final class ActivityThread extends ClientTransactionHandler {
+             context.setOuterContext(service);
+             service.attach(context, this, data.info.name, data.token, app,
+                     ActivityManager.getService());
++            GmsHooks.attachService(service);
+             service.onCreate();
+             mServices.put(data.token, service);
+             try {
+diff --git a/core/java/android/app/ContextImpl.java b/core/java/android/app/ContextImpl.java
+index 7effbb3f7c84..d67c20e3cfff 100644
+--- a/core/java/android/app/ContextImpl.java
++++ b/core/java/android/app/ContextImpl.java
+@@ -22,6 +22,7 @@ import static android.os.StrictMode.vmIncorrectContextUseEnabled;
+ import android.annotation.IntDef;
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
++import android.app.compat.gms.GmsCompat;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.AutofillOptions;
+ import android.content.BroadcastReceiver;
+@@ -88,6 +89,7 @@ import android.view.DisplayAdjustments;
+ import android.view.autofill.AutofillManager.AutofillClient;
+ 
+ import com.android.internal.annotations.GuardedBy;
++import com.android.internal.gmscompat.GmsHooks;
+ import com.android.internal.util.Preconditions;
+ 
+ import dalvik.system.BlockGuard;
+@@ -1666,6 +1668,10 @@ class ContextImpl extends Context {
+ 
+     @Override
+     public ComponentName startService(Intent service) {
++        if (GmsCompat.isEnabled()) {
++            return GmsHooks.startService(this, service);
++        }
++
+         warnIfCallingFromSystemProcess();
+         return startServiceCommon(service, false, mUser);
+     }
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index 35c112c13316..f228861f5a52 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -16,6 +16,17 @@
+ 
+ package com.android.internal.gmscompat;
+ 
++import android.app.Notification;
++import android.app.NotificationChannel;
++import android.app.NotificationManager;
++import android.app.PendingIntent;
++import android.app.Service;
++import android.app.compat.gms.GmsCompat;
++import android.content.ComponentName;
++import android.content.Context;
++import android.content.Intent;
++import android.util.Log;
++
+ /**
+  * API shims for Google Play Services compatibility. Hooks that are more complicated than a simple
+  * constant return value should be delegated to this class for easier maintenance.
+@@ -25,6 +36,72 @@ package com.android.internal.gmscompat;
+ public final class GmsHooks {
+     private static final String TAG = "GmsCompat/Hooks";
+ 
++    // Foreground service notifications
++    private static final String FGS_CHANNEL_ID = "service_shim";
++    private static boolean fgsChannelCreated = false;
++
+     // Static only
+     private GmsHooks() { }
++
++    /*
++     * Foreground service notifications to keep GMS services alive
++     */
++
++    // Make all services foreground to keep them alive
++    // ContextImpl#startService(Intent)
++    public static ComponentName startService(Context context, Intent service) {
++        return context.startForegroundService(service);
++    }
++
++    private static void createFgsChannel(Service service) {
++        if (fgsChannelCreated) {
++            return;
++        }
++
++        NotificationManager notificationManager = (NotificationManager)
++                service.getSystemService(Context.NOTIFICATION_SERVICE);
++
++        CharSequence name = service.getText(
++                com.android.internal.R.string.foreground_service_gms_shim_category);
++        NotificationChannel channel = new NotificationChannel(FGS_CHANNEL_ID, name,
++                NotificationManager.IMPORTANCE_LOW);
++        notificationManager.createNotificationChannel(channel);
++
++        fgsChannelCreated = true;
++    }
++
++    // Post notification on foreground service start
++    // ActivityThread#handleCreateService(CreateServiceData)
++    public static void attachService(Service service) {
++        if (!GmsCompat.isEnabled()) {
++            return;
++        }
++
++        // Shorten name for display
++        String serviceName = service.getClass().getName()
++                .replace("com.google.android.gms.", "c.g.a.g.")
++                .replace("com.google.android.", "c.g.a.")
++                .replace("com.google.", "c.g.");
++
++        // Channel
++        createFgsChannel(service);
++        // Notification
++        PendingIntent pi = PendingIntent.getActivity(service, 100, new Intent(),
++                PendingIntent.FLAG_IMMUTABLE);
++        Notification notification = new Notification.Builder(service, FGS_CHANNEL_ID)
++                .setSmallIcon(service.getApplicationInfo().icon)
++                .setContentTitle(serviceName)
++                .setContentIntent(pi)
++                .build();
++
++        Log.d(TAG, "Posting notification for service: " + service.getClass().getName());
++        service.startForeground(serviceName.hashCode(), notification);
++    }
++
++    // GMS tries to clean up its own notification channels periodically.
++    // Don't let it delete the FGS shim channel because that throws an exception and crashes GMS.
++    // NotificationManager#deleteNotificationChannel(String)
++    public static boolean skipDeleteNotificationChannel(String channelId) {
++        return GmsCompat.isEnabled() && FGS_CHANNEL_ID.equals(channelId);
++    }
+ }
+diff --git a/core/res/res/values/strings.xml b/core/res/res/values/strings.xml
+index d6ee28b93f92..a1951d1ff2d3 100644
+--- a/core/res/res/values/strings.xml
++++ b/core/res/res/values/strings.xml
+@@ -736,6 +736,9 @@
+     <string name="foreground_service_multiple_separator"><xliff:g id="left_side">%1$s</xliff:g>,
+         <xliff:g id="right_side">%2$s</xliff:g></string>
+ 
++    <!-- Name for foreground service notification category created by GmsCompat  -->
++    <string name="foreground_service_gms_shim_category">Services</string>
++
+     <!-- Displayed to the user to tell them that they have started up the phone in "safe mode" -->
+     <string name="safeMode">Safe mode</string>
+ 
+diff --git a/core/res/res/values/symbols.xml b/core/res/res/values/symbols.xml
+index 3ef0a8dc9daa..4fa4bc50d6a3 100644
+--- a/core/res/res/values/symbols.xml
++++ b/core/res/res/values/symbols.xml
+@@ -3454,6 +3454,7 @@
+   <java-symbol type="string" name="foreground_service_apps_in_background" />
+   <java-symbol type="string" name="foreground_service_tap_for_details" />
+   <java-symbol type="string" name="foreground_service_multiple_separator" />
++  <java-symbol type="string" name="foreground_service_gms_shim_category" />
+ 
+   <java-symbol type="bool" name="config_enableCredentialFactoryResetProtection" />
+ 
+-- 
+2.33.0
+

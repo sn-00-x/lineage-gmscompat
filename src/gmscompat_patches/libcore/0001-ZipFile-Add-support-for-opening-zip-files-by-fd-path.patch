@@ -1,0 +1,45 @@
+From b5eea107452b4baa38d5af86f8eaec9ca3a090d9 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Wed, 28 Jul 2021 17:13:00 -0700
+Subject: [PATCH 1/2] ZipFile: Add support for opening zip files by fd paths
+
+In some cases, it can be useful to open and parse zip files that are
+only available by fd reference. For example, file descriptors of APKs
+containing files to load may be sent via Binder IPC for clients to use.
+
+Unfortuantely, while it is already possible for StrictJarFile to open
+APKs by file descriptor, using that API is not an option because our
+/proc/self/fd/## path is passed to DexPathList for use in ClassLoader
+implementations.
+
+This is necessary for compatibility with Google Play Services' dynamic
+module system (Dynamite) without weakening the SELinux sandbox to allow
+other apps to open module APKs from
+/data/user_de/0/com.google.android.gms/app_chimera/m.
+
+Change-Id: Ibb099307a4267707f2de73369b5665b7af26352b
+---
+ ojluni/src/main/native/ZipFile.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/ojluni/src/main/native/ZipFile.c b/ojluni/src/main/native/ZipFile.c
+index daf5d8efff..a7dce3cf28 100644
+--- a/ojluni/src/main/native/ZipFile.c
++++ b/ojluni/src/main/native/ZipFile.c
+@@ -109,7 +109,12 @@ ZipFile_open(JNIEnv *env, jclass cls, jstring name,
+                 goto finally;
+             }
+ #else
+-            zfd = JVM_Open(path, flag, 0);
++            if (!strncmp("/proc/self/fd/", path, strlen("/proc/self/fd/")) &&
++                    sscanf(path, "/proc/self/fd/%d", &zfd) == 1) {
++                zfd = dup(zfd);
++            } else {
++                zfd = JVM_Open(path, flag, 0);
++            }
+             if (zfd < 0) {
+                 throwFileNotFoundException(env, name);
+                 goto finally;
+-- 
+2.33.0
+

@@ -1,0 +1,75 @@
+From fbef809b819abf4d5c16761a7badedc069eda544 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Sat, 10 Jul 2021 01:58:47 -0700
+Subject: [PATCH 09/34] gmscompat: Add REQUEST_INSTALL_PACKAGES permission to
+ Play Store
+
+We have a hook to request user action for package installs from Play
+Store, but it still needs the REQUEST_INSTALL_PACKAGES permission to
+work.
+
+Change-Id: I83f7ad20f90067dc68bb145fdaf5ab5a89972a92
+---
+ core/java/android/content/pm/PackageParser.java       | 11 ++++++++---
+ .../content/pm/parsing/ParsingPackageUtils.java       |  3 +++
+ 2 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/core/java/android/content/pm/PackageParser.java b/core/java/android/content/pm/PackageParser.java
+index 70e4e6cbf622..18b0ad28202b 100644
+--- a/core/java/android/content/pm/PackageParser.java
++++ b/core/java/android/content/pm/PackageParser.java
+@@ -94,6 +94,7 @@ import android.view.Gravity;
+ 
+ import com.android.internal.R;
+ import com.android.internal.annotations.VisibleForTesting;
++import com.android.internal.gmscompat.GmsInfo;
+ import com.android.internal.os.ClassLoaderFactory;
+ import com.android.internal.util.ArrayUtils;
+ import com.android.internal.util.XmlUtils;
+@@ -258,11 +259,13 @@ public class PackageParser {
+         @UnsupportedAppUsage
+         public final int sdkVersion;
+         public final int fileVersion;
++        public final String targetPackage;
+ 
+-        public NewPermissionInfo(String name, int sdkVersion, int fileVersion) {
++        public NewPermissionInfo(String name, int sdkVersion, int fileVersion, String targetPackage) {
+             this.name = name;
+             this.sdkVersion = sdkVersion;
+             this.fileVersion = fileVersion;
++            this.targetPackage = targetPackage;
+         }
+     }
+ 
+@@ -278,10 +281,12 @@ public class PackageParser {
+     @UnsupportedAppUsage
+     public static final PackageParser.NewPermissionInfo NEW_PERMISSIONS[] =
+         new PackageParser.NewPermissionInfo[] {
++            new PackageParser.NewPermissionInfo(android.Manifest.permission.REQUEST_INSTALL_PACKAGES,
++                    android.os.Build.VERSION_CODES.CUR_DEVELOPMENT + 1, 0, GmsInfo.PACKAGE_PLAY_STORE),
+             new PackageParser.NewPermissionInfo(android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+-                    android.os.Build.VERSION_CODES.DONUT, 0),
++                    android.os.Build.VERSION_CODES.DONUT, 0, null),
+             new PackageParser.NewPermissionInfo(android.Manifest.permission.READ_PHONE_STATE,
+-                    android.os.Build.VERSION_CODES.DONUT, 0)
++                    android.os.Build.VERSION_CODES.DONUT, 0, null),
+     };
+ 
+     /**
+diff --git a/core/java/android/content/pm/parsing/ParsingPackageUtils.java b/core/java/android/content/pm/parsing/ParsingPackageUtils.java
+index ab0ed51fb909..c33fc0b13fda 100644
+--- a/core/java/android/content/pm/parsing/ParsingPackageUtils.java
++++ b/core/java/android/content/pm/parsing/ParsingPackageUtils.java
+@@ -2528,6 +2528,9 @@ public class ParsingPackageUtils {
+             if (pkg.getTargetSdkVersion() >= npi.sdkVersion) {
+                 break;
+             }
++            if (npi.targetPackage != null && !pkg.getPackageName().equals(npi.targetPackage)) {
++                continue;
++            }
+             if (!pkg.getRequestedPermissions().contains(npi.name)) {
+                 if (newPermsMsg == null) {
+                     newPermsMsg = new StringBuilder(128);
+-- 
+2.33.0
+

@@ -1,0 +1,95 @@
+From 374b5d24f169fdbbf4c639edee533517c97df6d0 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Mon, 12 Jul 2021 16:00:37 -0700
+Subject: [PATCH 10/34] gmscompat: Handle user action requests for package
+ install sessions
+
+This makes Play Store app installation work to an extent by handling the
+user action requests required for unprivileged apps. However, Play Store
+often fails to receive the "installation succeeded" event, causing it to
+hang on "Installing..." until it times out.
+
+Change-Id: Ie230cc9438706ac0668f6c21d632b375dec2ac68
+---
+ core/java/android/app/LoadedApk.java          |  5 +++
+ .../android/internal/gmscompat/GmsHooks.java  | 36 +++++++++++++++++++
+ 2 files changed, 41 insertions(+)
+
+diff --git a/core/java/android/app/LoadedApk.java b/core/java/android/app/LoadedApk.java
+index d00d91656c2e..3f7ef0b65cea 100644
+--- a/core/java/android/app/LoadedApk.java
++++ b/core/java/android/app/LoadedApk.java
+@@ -59,6 +59,7 @@ import android.util.SparseArray;
+ import android.view.Display;
+ import android.view.DisplayAdjustments;
+ 
++import com.android.internal.gmscompat.GmsHooks;
+ import com.android.internal.util.ArrayUtils;
+ 
+ import dalvik.system.BaseDexClassLoader;
+@@ -1476,6 +1477,10 @@ public final class LoadedApk {
+             @Override
+             public void performReceive(Intent intent, int resultCode, String data,
+                     Bundle extras, boolean ordered, boolean sticky, int sendingUser) {
++                if (GmsHooks.performReceive(intent)) {
++                    return;
++                }
++
+                 final LoadedApk.ReceiverDispatcher rd;
+                 if (intent == null) {
+                     Log.wtf(TAG, "Null intent received");
+diff --git a/core/java/com/android/internal/gmscompat/GmsHooks.java b/core/java/com/android/internal/gmscompat/GmsHooks.java
+index 534436a25902..7c73b6f09a09 100644
+--- a/core/java/com/android/internal/gmscompat/GmsHooks.java
++++ b/core/java/com/android/internal/gmscompat/GmsHooks.java
+@@ -28,6 +28,7 @@ import android.app.compat.gms.GmsCompat;
+ import android.content.ComponentName;
+ import android.content.Context;
+ import android.content.Intent;
++import android.content.pm.PackageInstaller;
+ import android.content.pm.PackageManager;
+ import android.content.pm.SharedLibraryInfo;
+ import android.os.Build;
+@@ -187,4 +188,39 @@ public final class GmsHooks {
+             WebView.setDataDirectorySuffix("process-shim--" + processName);
+         }
+     }
++
++    // Request user action for package install sessions
++    // LoadedApk.ReceiverDispatcher.InnerReceiver#performReceive(Intent, int, String, Bundle, boolean, boolean, int)
++    public static boolean performReceive(Intent intent) {
++        if (!GmsCompat.isEnabled()) {
++            return false;
++        }
++
++        // Validate - we only want to handle user action requests
++        if (!(intent.hasExtra(PackageInstaller.EXTRA_SESSION_ID) &&
++                intent.hasExtra(PackageInstaller.EXTRA_STATUS) &&
++                intent.hasExtra(Intent.EXTRA_INTENT))) {
++            return false;
++        }
++        if (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, 0) !=
++                PackageInstaller.STATUS_PENDING_USER_ACTION) {
++            return false;
++        }
++
++        Application app = ActivityThread.currentApplication();
++        if (app == null) {
++            return false;
++        }
++
++        // Use the intent
++        Log.i(TAG, "Requesting user confirmation for package install session");
++        Intent confirmIntent = intent.getParcelableExtra(Intent.EXTRA_INTENT);
++        // Make it work with the Application context
++        confirmIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
++        // TODO: post notification if app is in the background
++        app.startActivity(confirmIntent);
++
++        // Don't dispatch it, otherwise Play Store abandons the session
++        return true;
++    }
+ }
+-- 
+2.33.0
+

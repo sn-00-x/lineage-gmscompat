@@ -1,0 +1,62 @@
+From 641a7579deb3d342c1f7cae910e7254e879c298c Mon Sep 17 00:00:00 2001
+From: Daniel Micay <danielmicay@gmail.com>
+Date: Tue, 24 Aug 2021 17:25:41 -0400
+Subject: [PATCH 29/34] gmscompat: add AppOps compatibility layer
+
+Play services uses app ops to enforce system permissions for apps using
+APIs through it. This can be supported for an untrusted proxy with the
+proxy app op APIs. There's no equivalent to startOp for the proxy API
+system so noteOp is used as an approximation where Play services will be
+taking more blame than necessary, which is fine.
+---
+ core/java/android/app/AppOpsManager.java | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/core/java/android/app/AppOpsManager.java b/core/java/android/app/AppOpsManager.java
+index 6baabb69e028..f3dbb3e64bf9 100644
+--- a/core/java/android/app/AppOpsManager.java
++++ b/core/java/android/app/AppOpsManager.java
+@@ -26,6 +26,7 @@ import android.annotation.RequiresPermission;
+ import android.annotation.SystemApi;
+ import android.annotation.SystemService;
+ import android.annotation.TestApi;
++import android.app.compat.gms.GmsCompat;
+ import android.app.usage.UsageStatsManager;
+ import android.compat.Compatibility;
+ import android.compat.annotation.ChangeId;
+@@ -7437,6 +7438,10 @@ public class AppOpsManager {
+      */
+     public int noteOpNoThrow(int op, int uid, @Nullable String packageName,
+             @Nullable String attributionTag, @Nullable String message) {
++        if (GmsCompat.isEnabled() && uid != Process.myUid()) {
++            return noteProxyOpNoThrow(op, packageName, uid, attributionTag, message);
++        }
++
+         try {
+             collectNoteOpCallsForValidation(op);
+             int collectionMode = getNotedOpCollectionMode(uid, packageName, op);
+@@ -7965,6 +7970,10 @@ public class AppOpsManager {
+      */
+     public int startOpNoThrow(int op, int uid, @NonNull String packageName,
+             boolean startIfModeDefault, @Nullable String attributionTag, @Nullable String message) {
++        if (GmsCompat.isEnabled() && uid != Process.myUid()) {
++            return noteProxyOpNoThrow(op, packageName, uid, attributionTag, message);
++        }
++
+         try {
+             collectNoteOpCallsForValidation(op);
+             int collectionMode = getNotedOpCollectionMode(uid, packageName, op);
+@@ -8042,6 +8051,10 @@ public class AppOpsManager {
+      */
+     public void finishOp(int op, int uid, @NonNull String packageName,
+             @Nullable String attributionTag) {
++        if (GmsCompat.isEnabled() && uid != Process.myUid()) {
++            return;
++        }
++
+         try {
+             mService.finishOperation(getClientId(), op, uid, packageName, attributionTag);
+         } catch (RemoteException e) {
+-- 
+2.33.0
+

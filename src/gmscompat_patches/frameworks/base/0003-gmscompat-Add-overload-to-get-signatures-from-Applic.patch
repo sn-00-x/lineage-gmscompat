@@ -1,0 +1,53 @@
+From ef7b48e3b400b696cc0ab1730c32f32bcda235c1 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Sat, 10 Jul 2021 01:56:27 -0700
+Subject: [PATCH 03/34] gmscompat: Add overload to get signatures from
+ ApplicationInfo
+
+This will be used in future commits.
+
+Change-Id: Ideb435682bcd2f24cdefc843cbfb778c8472dbb1
+---
+ core/java/android/app/compat/gms/GmsCompat.java | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/core/java/android/app/compat/gms/GmsCompat.java b/core/java/android/app/compat/gms/GmsCompat.java
+index d4b3aa0b248e..617c2dd06677 100644
+--- a/core/java/android/app/compat/gms/GmsCompat.java
++++ b/core/java/android/app/compat/gms/GmsCompat.java
+@@ -97,7 +97,7 @@ public final class GmsCompat {
+     }
+ 
+     /**
+-     * Check whether the given app is part of the Google Play Services family.
++     * Check whether the given app is unprivileged and part of the Google Play Services family.
+      *
+      * @hide
+      */
+@@ -122,10 +122,9 @@ public final class GmsCompat {
+     }
+ 
+     /** @hide */
+-    // CompatChange#isEnabled(ApplicationInfo)
+-    public static boolean isChangeEnabled(CompatibilityChangeInfo change, ApplicationInfo app) {
++    public static boolean isGmsApp(ApplicationInfo app) {
+         // Privileged GMS doesn't need any compatibility changes
+-        if (change.getId() != GMS_UNPRIVILEGED_COMPAT || app.isSystemApp()) {
++        if (app.isSystemApp()) {
+             return false;
+         }
+ 
+@@ -147,4 +146,10 @@ public final class GmsCompat {
+                 pkg.signingInfo.getSigningCertificateHistory();
+         return isGmsApp(app.packageName, signatures);
+     }
++
++    /** @hide */
++    // CompatChange#isEnabled(ApplicationInfo)
++    public static boolean isChangeEnabled(CompatibilityChangeInfo change, ApplicationInfo app) {
++        return change.getId() == GMS_UNPRIVILEGED_COMPAT && isGmsApp(app);
++    }
+ }
+-- 
+2.33.0
+

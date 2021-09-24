@@ -1,0 +1,38 @@
+From 9d0a5759e03f1478af7b04a40248b1d94e0fc223 Mon Sep 17 00:00:00 2001
+From: Danny Lin <danny@kdrag0n.dev>
+Date: Mon, 12 Jul 2021 16:53:06 -0700
+Subject: [PATCH 12/34] gmscompat: Automatically force GMS apps to be queryable
+
+GMS apps need to be queryable from all apps by design, so set the flag
+automatically instead of relying on the user to install them with `adb
+install --force-queryable`.
+
+Change-Id: I2795f3c5aac56e3cac0c024d09af4dc2a8efde7d
+---
+ services/core/java/com/android/server/pm/AppsFilter.java | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/services/core/java/com/android/server/pm/AppsFilter.java b/services/core/java/com/android/server/pm/AppsFilter.java
+index 10f77144e022..244e24fbb74f 100644
+--- a/services/core/java/com/android/server/pm/AppsFilter.java
++++ b/services/core/java/com/android/server/pm/AppsFilter.java
+@@ -24,6 +24,7 @@ import static com.android.internal.annotations.VisibleForTesting.Visibility.PRIV
+ import android.Manifest;
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
++import android.app.compat.gms.GmsCompat;
+ import android.content.Intent;
+ import android.content.IntentFilter;
+ import android.content.pm.PackageManager;
+@@ -568,6 +569,8 @@ public class AppsFilter {
+                 mForceQueryable.contains(newPkgSetting.appId)
+                         /* shared user that is already force queryable */
+                         || newPkgSetting.forceQueryableOverride /* adb override */
++                        || GmsCompat.isGmsApp(newPkg.getPackageName(),
++                            newPkg.getSigningDetails().signatures, newPkg.isPrivileged())
+                         || (newPkgSetting.isSystem() && (mSystemAppsQueryable
+                         || newPkg.isForceQueryable()
+                         || ArrayUtils.contains(mForceQueryableByDevicePackageNames,
+-- 
+2.33.0
+

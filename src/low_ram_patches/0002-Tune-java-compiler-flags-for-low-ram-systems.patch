@@ -1,0 +1,42 @@
+From 0532a8f998067174d7487a699d92b1c244f6686c Mon Sep 17 00:00:00 2001
+From: masemoel <az.az.az.mjme@gmail.com>
+Date: Mon, 21 Dec 2020 18:47:52 +0100
+Subject: [PATCH 2/2] Tune java compiler flags for low ram systems
+
+* Reduce max heap size
+
+Change-Id: I75b052d5bb432bd31644c7c6fe87a3449e593aea
+---
+ java/config/config.go   | 2 +-
+ java/config/makevars.go | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/java/config/config.go b/java/config/config.go
+index 1d0dd617..07850226 100644
+--- a/java/config/config.go
++++ b/java/config/config.go
+@@ -64,7 +64,7 @@ const (
+ func init() {
+ 	pctx.Import("github.com/google/blueprint/bootstrap")
+ 
+-	pctx.StaticVariable("JavacHeapSize", "2048M")
++	pctx.StaticVariable("JavacHeapSize", "1024M")
+ 	pctx.StaticVariable("JavacHeapFlags", "-J-Xmx${JavacHeapSize}")
+ 	pctx.StaticVariable("DexFlags", "-JXX:OnError='cat hs_err_pid%p.log' -JXX:CICompilerCount=6 -JXX:+UseDynamicNumberOfGCThreads")
+ 
+diff --git a/java/config/makevars.go b/java/config/makevars.go
+index b355fad8..cf05fa37 100644
+--- a/java/config/makevars.go
++++ b/java/config/makevars.go
+@@ -42,7 +42,7 @@ func makeVarsProvider(ctx android.MakeVarsContext) {
+ 	ctx.Strict("COMMON_JDK_FLAGS", "${CommonJdkFlags}")
+ 
+ 	ctx.Strict("DX", "${D8Cmd}")
+-	ctx.Strict("DX_COMMAND", "${D8Cmd} -JXms16M -JXmx2048M")
++	ctx.Strict("DX_COMMAND", "${D8Cmd} -JXms16M -JXmx1024M")
+ 	ctx.Strict("R8_COMPAT_PROGUARD", "${R8Cmd}")
+ 
+ 	ctx.Strict("TURBINE", "${TurbineJar}")
+-- 
+2.33.0
+
